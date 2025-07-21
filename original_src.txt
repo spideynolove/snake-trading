@@ -1,0 +1,2920 @@
+Directory structure:
+└── v4/
+    ├── agent.py
+    ├── config.py
+    ├── debug_hierarchical.py
+    ├── dwx_integration.py
+    ├── forex_game.py
+    ├── grid_search_config.py
+    ├── grid_search_trainer.py
+    ├── gym_env_adapter.py
+    ├── helper.py
+    ├── model.py
+    ├── parallel_grid_search.py
+    ├── real_data_loader.py
+    ├── simple_risk_manager.py
+    ├── test_config.py
+    └── trainer.py
+
+================================================
+File: agent.py
+================================================
+import torch
+import random
+import numpy as np
+from collections import deque
+from forex_game import ForexGameAI, Direction
+from model import Linear_QNet, QTrainer, create_model_from_config
+from config import PRESET_CONFIGS
+
+class Agent:
+
+    def __init__(self, config_name='testing'):
+        self.n_games = 0
+        self.model, self.trainer, self.config = create_model_from_config(
+            config_name)
+        training_config = self.config['training']
+        self.gamma = training_config['gamma']
+        self.epsilon_start = training_config['epsilon_start']
+        self.epsilon_decay = training_config['epsilon_decay']
+        self.epsilon_min = training_config['epsilon_min']
+        self.memory = deque(maxlen=training_config['memory_size'])
+        self.batch_size = training_config['batch_size']
+        self.epsilon = 0
+        self.recent_performance = deque(maxlen=50)
+        self.performance_threshold = 0.0
+        print(
+            f'✓ V4 Agent initialized with {config_name.upper()} configuration')
+        print(f"  Memory Size: {training_config['memory_size']:,}")
+        print(f"  Batch Size: {training_config['batch_size']:,}")
+        print(f'  Epsilon Start: {self.epsilon_start}')
+        print(f'  Epsilon Decay: {self.epsilon_decay}')
+        print(f'  Epsilon Min: {self.epsilon_min}')
+
+    def get_state(self, game):
+        return game.get_h1_state()
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def train_long_memory(self):
+        if len(self.memory) > self.batch_size:
+            mini_sample = random.sample(self.memory, self.batch_size)
+        else:
+            mini_sample = self.memory
+        if len(mini_sample) == 0:
+            return 0.0
+        states, actions, rewards, next_states, dones = zip(*mini_sample)
+        return self.trainer.train_step(states, actions, rewards,
+            next_states, dones)
+
+    def train_short_memory(self, state, action, reward, next_state, done):
+        return self.trainer.train_step(state, action, reward, next_state, done)
+
+    def get_action(self, state):
+        self._update_adaptive_epsilon()
+        final_move = [0, 0, 0]
+        if random.random() < self.epsilon:
+            move = random.randint(0, 2)
+            final_move[move] = 1
+        else:
+            state0 = torch.tensor(state, dtype=torch.float)
+            with torch.no_grad():
+                prediction = self.model(state0)
+                move = torch.argmax(prediction).item()
+            final_move[move] = 1
+        return final_move
+
+    def _update_adaptive_epsilon(self):
+        if len(self.recent_performance) >= 10:
+            avg_performance = np.mean(list(self.recent_performance)[-10:])
+            
+            if avg_performance > self.performance_threshold:
+                decay_rate = 0.995
+            else:
+                decay_rate = 0.9999
+        else:
+            decay_rate = self.epsilon_decay
+        
+        if self.epsilon == 0:
+            self.epsilon = self.epsilon_start
+        else:
+            self.epsilon = max(self.epsilon_min, self.epsilon * decay_rate)
+    
+    def update_performance(self, performance_metric):
+        self.recent_performance.append(performance_metric)
+    
+    def get_current_epsilon(self):
+        return self.epsilon
+
+    def save_model(self, filename=None):
+        if filename is None:
+            filename = f'model_game_{self.n_games}.pth'
+        self.model.save(filename)
+
+    def load_model(self, filename):
+        return self.model.load(filename)
+
+def train(config_name='testing', episodes=500):
+    plot_scores = []
+    plot_mean_scores = []
+    plot_portfolio_values = []
+    plot_losses = []
+    total_score = 0
+    record = 0
+    best_portfolio = 10000
+    agent = Agent(config_name)
+    from real_data_loader import load_real_gbpusd_data
+    data, d1_data = load_real_gbpusd_data()
+    game = ForexGameAI(data)
+    print(
+        f'Starting V4 Forex DQN Training - {config_name.upper()} Configuration'
+        )
+    print('Philosophy: Simplicity beats complexity')
+    print(f'Target Episodes: {episodes}')
+    print('=' * 60)
+    while agent.n_games < episodes:
+        state_old = agent.get_state(game)
+        final_move = agent.get_action(state_old)
+        reward, done, portfolio_value = game.play_step(final_move.index(1))
+        state_new = agent.get_state(game)
+        loss = agent.train_short_memory(state_old, final_move, reward,
+            state_new, done)
+        agent.remember(state_old, final_move, reward, state_new, done)
+        if done:
+            game.reset()
+            agent.n_games += 1
+            batch_loss = agent.train_long_memory()
+            total_return = (portfolio_value - 10000) / 10000 * 100
+            if total_return > record:
+                record = total_return
+                agent.save_model('best_return_model.pth')
+            if portfolio_value > best_portfolio:
+                best_portfolio = portfolio_value
+                agent.save_model(f'best_portfolio_${int(portfolio_value)}.pth')
+            current_epsilon = agent.get_current_epsilon()
+            print(
+                f'Episode {agent.n_games}/{episodes} | Portfolio: ${portfolio_value:.2f} | Return: {total_return:.2f}% | Record: {record:.2f}% | ε: {current_epsilon:.4f}'
+                )
+            stats = game.get_trade_stats()
+            if stats['total_trades'] > 0:
+                print(
+                    f"  Trades: {stats['total_trades']}, Win Rate: {stats['win_rate']:.2%}, Avg P&L: ${stats['avg_pnl']:.2f}, Loss: {batch_loss:.4f}"
+                    )
+            plot_scores.append(total_return)
+            total_score += total_return
+            mean_score = total_score / agent.n_games
+            plot_mean_scores.append(mean_score)
+            plot_portfolio_values.append(portfolio_value)
+            plot_losses.append(batch_loss if batch_loss else 0.0)
+            if agent.n_games % 10 == 0:
+                recent_avg = np.mean(plot_scores[-10:])
+                recent_portfolio = np.mean(plot_portfolio_values[-10:])
+                recent_loss = np.mean(plot_losses[-10:])
+                print(
+                    f'📊 Last 10 episodes: Avg Return: {recent_avg:.2f}%, Avg Portfolio: ${recent_portfolio:.2f}, Avg Loss: {recent_loss:.4f}'
+                    )
+            if agent.n_games % 50 == 0:
+                agent.save_model(f'checkpoint_episode_{agent.n_games}.pth')
+                print(f'✓ Checkpoint saved at episode {agent.n_games}')
+    print(f'\n🎉 Training completed after {episodes} episodes!')
+    print(f'📈 Final Results:')
+    print(f'  Best Return: {record:.2f}%')
+    print(f'  Best Portfolio: ${best_portfolio:.2f}')
+    print(f'  Final Portfolio: ${portfolio_value:.2f}')
+    print(f'  Configuration: {config_name.upper()}')
+    agent.save_model('final_model.pth')
+    return {'scores': plot_scores, 'mean_scores': plot_mean_scores,
+        'portfolio_values': plot_portfolio_values, 'losses': plot_losses,
+        'best_return': record, 'best_portfolio': best_portfolio,
+        'final_portfolio': portfolio_value, 'episodes': episodes, 'config':
+        config_name}
+
+def demonstrate_configs():
+    from config import print_config_summary, PRESET_CONFIGS
+    print('V4 Configurable DQN Architecture Demo')
+    print('=' * 50)
+    print('\nAvailable Configurations:')
+    for config_name in PRESET_CONFIGS.keys():
+        print(f'  • {config_name.upper()}')
+    print('\nConfiguration Details:')
+    print_config_summary('testing')
+    print('\n' + '=' * 50)
+    print('To train with different configurations:')
+    print("  train('development')  # Fast training, simple network")
+    print("  train('testing')      # Balanced for development")
+    print("  train('production')   # Deep network, careful training")
+    print("  train('research')     # Advanced features enabled")
+    print(
+        "  train('competition')  # Ultra-deep network, maximum sophistication")
+
+if __name__ == '__main__':
+    import pandas as pd
+    import argparse
+    parser = argparse.ArgumentParser(description='V4 Forex DQN Training')
+    parser.add_argument('--config', default='testing', choices=[
+        'development', 'testing', 'production', 'research', 'competition'],
+        help='DQN configuration to use')
+    parser.add_argument('--episodes', type=int, default=100, help=
+        'Number of episodes to train')
+    parser.add_argument('--demo', action='store_true', help=
+        'Show configuration demo instead of training')
+    args = parser.parse_args()
+    if args.demo:
+        demonstrate_configs()
+    else:
+        print(
+            f'Starting training with {args.config} configuration for {args.episodes} episodes...'
+            )
+        results = train(args.config, args.episodes)
+        print(
+            f'\nTraining completed! Check ./model/ directory for saved models.'
+            )
+
+================================================
+File: config.py
+================================================
+import torch.nn as nn
+
+class V4Config:
+    STATE_SIZE = 13
+    ACTION_SIZE = 3
+    NETWORK_CONFIGS = {'simple': {'hidden_layers': [256], 'dropout_rate': 
+        0.0, 'activation': 'relu', 'batch_norm': False}, 'standard': {
+        'hidden_layers': [512, 256, 128], 'dropout_rate': 0.2, 'activation':
+        'relu', 'batch_norm': True}, 'deep': {'hidden_layers': [512, 512, 
+        256, 128], 'dropout_rate': 0.3, 'activation': 'relu', 'batch_norm':
+        True}, 'advanced': {'hidden_layers': [1024, 512, 512, 256, 128],
+        'dropout_rate': 0.4, 'activation': 'relu', 'batch_norm': True},
+        'ultra': {'hidden_layers': [2048, 1024, 512, 512, 256, 128],
+        'dropout_rate': 0.5, 'activation': 'relu', 'batch_norm': True}}
+    TRAINING_CONFIGS = {'fast': {'lr': 0.01, 'gamma': 0.9, 'epsilon_start':
+        80, 'epsilon_decay': 0.995, 'epsilon_min': 0.01, 'memory_size': 
+        50000, 'batch_size': 512, 'target_update_freq': 100}, 'standard': {
+        'lr': 0.001, 'gamma': 0.95, 'epsilon_start': 15, 'epsilon_decay': 
+        0.999, 'epsilon_min': 0.05, 'memory_size': 100000, 'batch_size': 
+        64, 'target_update_freq': 100}, 'careful': {'lr': 0.0001,
+        'gamma': 0.99, 'epsilon_start': 100, 'epsilon_decay': 0.9999,
+        'epsilon_min': 0.001, 'memory_size': 200000, 'batch_size': 2000,
+        'target_update_freq': 2000}}
+    ADVANCED_FEATURES = {'double_dqn': True, 'dueling_dqn': True,
+        'prioritized_replay': True, 'noisy_networks': False, 'multi_step': 
+        3, 'gradient_clipping': 1.0}
+    RISK_CONFIG = {'use_risk_features': True, 'risk_percent_per_trade': 2.0,
+        'leverage': 100, 'sl_distance_pips': 15, 'tp_rr_ratio': 1.34,
+        'min_position_size': 0.1, 'max_position_size': 2.0, 'pip_value': 
+        0.0001, 'commission_pips': 2.0, 'risk_based_rewards': True,
+        'stop_loss_integration': True}
+    GPU_CONFIG = {'use_gpu': True, 'mixed_precision': True, 'data_parallel':
+        True, 'device_ids': [0, 1]}
+
+def get_activation_function(activation_name):
+    activations = {'relu': nn.ReLU(), 'leaky_relu': nn.LeakyReLU(), 'elu':
+        nn.ELU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'tanh': nn.Tanh(),
+        'sigmoid': nn.Sigmoid()}
+    return activations.get(activation_name, nn.ReLU())
+
+def create_model_config(network_type='standard', training_type='standard'):
+    config = V4Config()
+    model_config = {'state_size': config.STATE_SIZE, 'action_size': config.
+        ACTION_SIZE, 'network': config.NETWORK_CONFIGS[network_type],
+        'training': config.TRAINING_CONFIGS[training_type], 'advanced':
+        config.ADVANCED_FEATURES, 'risk': config.RISK_CONFIG, 'gpu': config
+        .GPU_CONFIG}
+    return model_config
+
+PRESET_CONFIGS = {'development': create_model_config('simple', 'fast'),
+    'testing': create_model_config('standard', 'standard'), 'production':
+    create_model_config('deep', 'careful'), 'research': create_model_config
+    ('advanced', 'careful'), 'competition': create_model_config('ultra',
+    'careful')}
+
+def print_config_summary(config_name='testing'):
+    config = PRESET_CONFIGS[config_name]
+    print(f'V4 Configuration: {config_name.upper()}')
+    print('=' * 50)
+    print(f"State Size: {config['state_size']} (V4 Simple)")
+    print(f"Action Size: {config['action_size']} (Hold/Buy/Sell)")
+    print(f"Network Layers: {config['network']['hidden_layers']}")
+    print(f"Dropout Rate: {config['network']['dropout_rate']}")
+    print(f"Batch Normalization: {config['network']['batch_norm']}")
+    print(f"Learning Rate: {config['training']['lr']}")
+    print(f"Memory Size: {config['training']['memory_size']:,}")
+    print(f"Batch Size: {config['training']['batch_size']:,}")
+    print(f"Double DQN: {config['advanced']['double_dqn']}")
+    print(f"Dueling DQN: {config['advanced']['dueling_dqn']}")
+    print(f"Prioritized Replay: {config['advanced']['prioritized_replay']}")
+    print(f"GPU Acceleration: {config['gpu']['use_gpu']}")
+    print(f"Mixed Precision: {config['gpu']['mixed_precision']}")
+
+if __name__ == '__main__':
+    print('Available V4 Configurations:')
+    print('=' * 60)
+    for config_name in PRESET_CONFIGS.keys():
+        print(f'\n{config_name.upper()}:')
+        config = PRESET_CONFIGS[config_name]
+        layers = config['network']['hidden_layers']
+        lr = config['training']['lr']
+        memory = config['training']['memory_size']
+        print(f'  Network: {len(layers)} layers {layers}')
+        print(f'  Training: LR={lr}, Memory={memory:,}')
+    print(f'\nDefault Config Summary:')
+    print_config_summary('testing')
+
+================================================
+File: debug_hierarchical.py
+================================================
+import pandas as pd
+import numpy as np
+from forex_game import HierarchicalForexGameAI
+
+def debug_hierarchical_system():
+    print('Hierarchical Multi-Timeframe System Debug')
+    print('=' * 50)
+    from real_data_loader import load_real_gbpusd_data
+    try:
+        data, _ = load_real_gbpusd_data(total_samples=500)
+    except:
+        print('Real data loading failed, skipping debug')
+        return
+    game = HierarchicalForexGameAI(data)
+    print(f'Total data points: {len(data)}')
+    print(f"Price range: {data['close'].min():.4f} - {data['close'].max():.4f}"
+        )
+    print(
+        f"Price trend: {(data['close'].iloc[-1] / data['close'].iloc[0] - 1) * 100:.2f}%"
+        )
+    game.reset()
+    print(f'\nTesting first 100 steps:')
+    d1_bias_changes = []
+    trade_attempts = []
+    for step in range(100):
+        state = game.get_h1_state()
+        current_bias = game.d1_trend_bias
+        if step == 0 or current_bias != prev_bias:
+            d1_bias_changes.append((step, current_bias))
+        prev_bias = current_bias
+        action = 1 if step % 10 == 0 else 0
+        old_position = game.position
+        reward, done, portfolio = game.play_step(action)
+        new_position = game.position
+        if old_position != new_position or reward != 0:
+            trade_attempts.append({'step': step, 'action': action,
+                'd1_bias': current_bias, 'old_pos': old_position, 'new_pos':
+                new_position, 'reward': reward, 'portfolio': portfolio})
+        if done:
+            break
+    print(f'\nD1 Trend Bias Changes:')
+    for step, bias in d1_bias_changes:
+        bias_name = {(-1): 'BEARISH', (0): 'FLAT', (1): 'BULLISH'}[bias]
+        print(f'  Step {step}: {bias_name} ({bias})')
+    print(f'\nTrade Attempts:')
+    for trade in trade_attempts[:10]:
+        print(
+            f"  Step {trade['step']}: Action={trade['action']}, D1_bias={trade['d1_bias']}, Pos: {trade['old_pos']} -> {trade['new_pos']}, Reward={trade['reward']}"
+            )
+    stats = game.get_trade_stats()
+    print(f'\nFinal Stats:')
+    print(f"  Total trades: {stats['total_trades']}")
+    print(f"  Win rate: {stats['win_rate']:.2%}")
+    print(f'  Portfolio: ${portfolio:.2f}')
+    print(f'  Final D1 bias: {game.d1_trend_bias}')
+
+if __name__ == '__main__':
+    debug_hierarchical_system()
+
+================================================
+File: dwx_integration.py
+================================================
+import sys
+import os
+import numpy as np
+from datetime import datetime
+from typing import Dict, Optional
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'v3', 'common'))
+try:
+    from dwx_signal_transmitter import DWXSignalTransmitter, V3SignalGenerator
+    from minimal_risk_manager import MinimalRiskManager
+    from simple_data_feed import SimpleDataFeed
+except ImportError as e:
+    print(f'Warning: Could not import V3 components: {e}')
+    print('DWX integration will not be available')
+from agent import Agent
+from forex_game import ForexGameAI, Direction
+from model import Linear_QNet
+
+class V4DWXIntegration:
+
+    def __init__(self, dwx_files_dir: str='/tmp/dwx_v4', initial_balance:
+        float=10000):
+        try:
+            self.dwx_transmitter = DWXSignalTransmitter(dwx_files_dir)
+            self.signal_generator = V3SignalGenerator(self.dwx_transmitter)
+            self.risk_manager = MinimalRiskManager(initial_balance)
+            print('✓ V3 DWX components initialized successfully')
+        except Exception as e:
+            print(f'✗ V3 DWX components not available: {e}')
+            self.dwx_transmitter = None
+            self.signal_generator = None
+            self.risk_manager = None
+        self.live_agent = None
+        self.live_data_feed = None
+        self.current_position = 0
+        self.position_entry_price = 0
+        self.is_live_trading = False
+        self.live_trades = []
+        self.signals_sent = 0
+        self.last_signal_time = None
+
+    def load_trained_model(self, model_path: str) ->bool:
+        try:
+            self.live_agent = Agent()
+            self.live_agent.model.load_state_dict(torch.load(model_path))
+            self.live_agent.epsilon = 0
+            print(f'✓ Loaded trained model from {model_path}')
+            return True
+        except Exception as e:
+            print(f'✗ Failed to load model: {e}')
+            return False
+
+    def start_live_trading(self, data_file_path: str, symbol: str='EURUSD'):
+        if not self.live_agent:
+            print('✗ No trained model loaded')
+            return False
+        if not self.dwx_transmitter:
+            print('✗ DWX components not available')
+            return False
+        try:
+            self.live_data_feed = SimpleDataFeed(data_file_path)
+            self.live_data_feed.load_data()
+            self.is_live_trading = True
+            self.symbol = symbol
+            print(f'✓ Started live trading for {symbol}')
+            print(f'  Data source: {data_file_path}')
+            print(f'  DWX directory: {self.dwx_transmitter.dwx_files_dir}')
+            print(f'  Risk management: Active')
+            return True
+        except Exception as e:
+            print(f'✗ Failed to start live trading: {e}')
+            return False
+
+    def process_live_tick(self) ->Optional[Dict]:
+        if not self.is_live_trading or not self.live_data_feed:
+            return None
+        try:
+            tick = self.live_data_feed.get_current_tick()
+            if not tick:
+                return None
+            current_state = self._create_v4_state(tick)
+            action_vector = self.live_agent.get_action(current_state)
+            action = action_vector.index(1)
+            signal_info = self._process_v4_action(action, tick)
+            return signal_info
+        except Exception as e:
+            print(f'Error processing live tick: {e}')
+            return None
+
+    def _create_v4_state(self, tick: Dict) ->np.ndarray:
+        try:
+            current_price = tick['close']
+            recent_data = self.live_data_feed.data.tail(50)
+            if len(recent_data) > 1:
+                price_high = recent_data['high'].max()
+                price_low = recent_data['low'].min()
+                if price_high > price_low:
+                    price_level = (current_price - price_low) / (price_high -
+                        price_low)
+                else:
+                    price_level = 0.5
+            else:
+                price_level = 0.5
+            if len(recent_data) > 5:
+                returns = recent_data['close'].pct_change().dropna()
+                volatility = returns.std() if len(returns) > 0 else 0.001
+                volatility = min(volatility * 100, 5.0) / 5.0
+            else:
+                volatility = 0.5
+            position_size = 1.0
+            immediate_risk = 0.0
+            if self.current_position != 0 and self.position_entry_price > 0:
+                if self.current_position == 1:
+                    unrealized_pnl_pct = (current_price - self.
+                        position_entry_price) / self.position_entry_price
+                else:
+                    unrealized_pnl_pct = (self.position_entry_price -
+                        current_price) / self.position_entry_price
+                immediate_risk = unrealized_pnl_pct * 0.1
+                immediate_risk = np.clip(immediate_risk, -0.2, 0.2)
+            state = np.array([price_level, volatility, position_size,
+                immediate_risk], dtype=float)
+            return state
+        except Exception as e:
+            print(f'Error creating V4 state: {e}')
+            return np.array([0.5, 0.5, 1.0, 0.0], dtype=float)
+
+    def _process_v4_action(self, action: int, tick: Dict) ->Optional[Dict]:
+        current_price = tick['close']
+        signal_info = None
+        is_valid, violations = self.risk_manager.validate_trade(self.symbol,
+            'buy' if action == Direction.BUY else 'sell', 0.01, current_price)
+        if not is_valid:
+            print(f'Trade blocked by risk management: {violations}')
+            return None
+        target_position = action - 1
+        if target_position != self.current_position:
+            success = self._execute_position_change(target_position,
+                current_price, tick['time'])
+            if success:
+                signal_info = {'timestamp': tick['time'], 'action': ['SELL',
+                    'CLOSE', 'BUY'][action], 'previous_position': self.
+                    current_position, 'new_position': target_position,
+                    'price': current_price, 'risk_validated': True}
+                self.signals_sent += 1
+                self.last_signal_time = datetime.now()
+        return signal_info
+
+    def _execute_position_change(self, target_position: int, current_price:
+        float, timestamp) ->bool:
+        try:
+            if self.current_position != 0:
+                close_success = self.signal_generator.process_approach_signal(
+                    'Pure RL', self.symbol, 0, lots=0.01)
+                if close_success:
+                    if self.position_entry_price > 0:
+                        pnl = self._calculate_trade_pnl(current_price)
+                        self.live_trades.append({'entry_price': self.
+                            position_entry_price, 'exit_price':
+                            current_price, 'direction': self.
+                            current_position, 'pnl': pnl, 'timestamp':
+                            timestamp})
+                        self.risk_manager.update_balance(pnl)
+            if target_position != 0:
+                signal_success = self.signal_generator.process_approach_signal(
+                    'Pure RL', self.symbol, target_position + 1, lots=0.01)
+                if signal_success:
+                    self.position_entry_price = current_price
+                    self.current_position = target_position
+                    self.risk_manager.update_position(self.symbol, 0.01,
+                        current_price, 'buy' if target_position == 1 else
+                        'sell')
+                return signal_success
+            else:
+                self.current_position = 0
+                self.position_entry_price = 0
+                return True
+        except Exception as e:
+            print(f'Error executing position change: {e}')
+            return False
+
+    def _calculate_trade_pnl(self, exit_price: float) ->float:
+        if self.position_entry_price == 0:
+            return 0
+        if self.current_position == 1:
+            pnl_pct = (exit_price - self.position_entry_price
+                ) / self.position_entry_price
+        else:
+            pnl_pct = (self.position_entry_price - exit_price
+                ) / self.position_entry_price
+        pnl_amount = pnl_pct * 0.01 * 100000 * self.position_entry_price
+        return pnl_amount
+
+    def get_live_performance(self) ->Dict:
+        if not self.live_trades:
+            return {'total_trades': 0, 'total_pnl': 0, 'win_rate': 0,
+                'current_position': self.current_position, 'signals_sent':
+                self.signals_sent}
+        profitable_trades = [t for t in self.live_trades if t['pnl'] > 0]
+        total_pnl = sum(t['pnl'] for t in self.live_trades)
+        return {'total_trades': len(self.live_trades), 'total_pnl':
+            total_pnl, 'win_rate': len(profitable_trades) / len(self.
+            live_trades), 'avg_pnl': total_pnl / len(self.live_trades),
+            'current_position': self.current_position, 'signals_sent': self
+            .signals_sent, 'last_signal': self.last_signal_time,
+            'risk_status': self.risk_manager.get_risk_metrics() if self.
+            risk_manager else None}
+
+    def stop_live_trading(self):
+        if self.is_live_trading and self.current_position != 0:
+            if self.live_data_feed:
+                current_tick = self.live_data_feed.get_current_tick()
+                if current_tick:
+                    self._execute_position_change(0, current_tick['close'],
+                        current_tick['time'])
+        self.is_live_trading = False
+        print('✓ Live trading stopped')
+
+def main():
+    print('V4 DWX Integration Demo')
+    print('=' * 40)
+    integration = V4DWXIntegration()
+    model_path = './model/best_return_model.pth'
+    if os.path.exists(model_path):
+        integration.load_trained_model(model_path)
+    else:
+        print(f'Model not found: {model_path}')
+        print('Train a model first using trainer.py')
+        return
+    data_path = '/home/hung/Public/Test/FX/data/GBPUSD60.csv'
+    if integration.start_live_trading(data_path, 'GBPUSD'):
+        print('\nProcessing live ticks (demo)...')
+        for i in range(10):
+            signal_info = integration.process_live_tick()
+            if signal_info:
+                print(f'Signal: {signal_info}')
+            else:
+                print(f'Tick {i + 1}: No action')
+        perf = integration.get_live_performance()
+        print(f'\nLive Performance: {perf}')
+        integration.stop_live_trading()
+
+if __name__ == '__main__':
+    import torch
+    main()
+
+================================================
+File: forex_game.py
+================================================
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from typing import Dict, Tuple
+from collections import namedtuple
+from config import V4Config
+
+class Direction:
+    CLOSE_FLAT = 0
+    ENTER_LONG = 1
+    ENTER_SHORT = 2
+
+Position = namedtuple('Position',
+    'direction entry_price entry_step position_size sl_price tp_price')
+
+class HierarchicalForexGameAI:
+
+    def __init__(self, data, initial_balance=10000):
+        self.data = data
+        self.initial_balance = initial_balance
+        config = V4Config()
+        self.risk_config = config.RISK_CONFIG
+        self.risk_percent = self.risk_config['risk_percent_per_trade'] / 100.0
+        self.leverage = self.risk_config['leverage']
+        self.sl_distance_pips = self.risk_config['sl_distance_pips']
+        self.tp_rr_ratio = self.risk_config['tp_rr_ratio']
+        self.min_position_size = self.risk_config['min_position_size']
+        self.max_position_size = self.risk_config['max_position_size']
+        self.pip_value = self.risk_config['pip_value']
+        self.commission_pips = self.risk_config['commission_pips']
+        self.reset()
+
+    def reset(self):
+        self.current_step = 50
+        self.balance = self.initial_balance
+        self.max_balance = self.initial_balance
+        self.position = None
+        self.trades_history = []
+        self.step_count = 0
+        return self.get_h1_state()
+
+    def get_h1_state(self):
+        if self.current_step >= len(self.data):
+            return np.array([0] * 13, dtype=float)
+        current_price = self.data.iloc[self.current_step]['close']
+        price_momentum = 0.0
+        if self.current_step >= 5:
+            price_5_ago = self.data.iloc[self.current_step - 5]['close']
+            price_momentum = (current_price - price_5_ago) / price_5_ago
+        recent_window = min(50, self.current_step)
+        recent_data = self.data.iloc[self.current_step - recent_window:self
+            .current_step + 1]
+        price_high = recent_data['high'].max()
+        price_low = recent_data['low'].min()
+        if price_high > price_low:
+            dist_high = (price_high - current_price) / (price_high - price_low)
+            dist_low = (current_price - price_low) / (price_high - price_low)
+        else:
+            dist_high = 0.5
+            dist_low = 0.5
+        position_state = 0.0
+        if self.position is not None:
+            position_state = (1.0 if self.position.direction == Direction.
+                ENTER_LONG else -1.0)
+        unrealized_pnl = 0.0
+        if self.position is not None:
+            if self.position.direction == Direction.ENTER_LONG:
+                unrealized_pnl = (current_price - self.position.entry_price
+                    ) / self.position.entry_price
+            else:
+                unrealized_pnl = (self.position.entry_price - current_price
+                    ) / self.position.entry_price
+            unrealized_pnl = np.clip(unrealized_pnl, -0.2, 0.2)
+        time_factor = self.current_step % 24 / 24.0
+        volatility_20 = 0.001
+        volatility_100 = 0.001
+        if self.current_step >= 20:
+            returns_20 = self.data.iloc[self.current_step - 20:self.
+                current_step + 1]['close'].pct_change().dropna()
+            if len(returns_20) > 0:
+                volatility_20 = returns_20.std()
+        if self.current_step >= 100:
+            returns_100 = self.data.iloc[self.current_step - 100:self.
+                current_step + 1]['close'].pct_change().dropna()
+            if len(returns_100) > 0:
+                volatility_100 = returns_100.std()
+        volatility_regime = min(volatility_20 / volatility_100 if 
+            volatility_100 > 0 else 1.0, 3.0) / 3.0
+        trend_strength = 0.0
+        if self.current_step >= 20:
+            trend_data = self.data.iloc[self.current_step - 20:self.
+                current_step + 1]['close']
+            trend_strength = (trend_data.iloc[-1] - trend_data.iloc[0]
+                ) / trend_data.iloc[0]
+            trend_strength = np.clip(trend_strength, -0.1, 0.1) / 0.1
+        risk_exposure = 0.0
+        sl_distance = 0.0
+        tp_distance = 0.0
+        current_pips = 0.0
+        if self.position is not None:
+            risk_exposure = (self.position.position_size * current_price /
+                self.balance)
+            sl_distance = abs(current_price - self.position.sl_price
+                ) / self.pip_value
+            tp_distance = abs(self.position.tp_price - current_price
+                ) / self.pip_value
+            if self.position.direction == Direction.ENTER_LONG:
+                current_pips = (current_price - self.position.entry_price
+                    ) / self.pip_value
+            else:
+                current_pips = (self.position.entry_price - current_price
+                    ) / self.pip_value
+        current_candle = self.data.iloc[self.current_step]
+        
+        volume_ratio = self._calculate_volume_ratio()
+        volume_price_confirm = self._calculate_volume_price_confirmation()
+        
+        session_indicator = self._get_session_indicator()
+        
+        hl_range = (current_candle['high'] - current_candle['low']) / current_candle['close']
+        volatility_cluster = self._calculate_volatility_clustering()
+        intrabar_momentum = self._calculate_intrabar_momentum()
+        
+        sr_distance = self._calculate_sr_distance()
+        
+        atr_value = self._calculate_atr()
+        
+        market_regime = self._detect_market_regime()
+        
+        state = np.array([
+            np.clip(price_momentum, -0.05, 0.05) / 0.05,
+            dist_high, 
+            dist_low,
+            np.clip(unrealized_pnl, -1.0, 1.0),
+            volume_ratio,
+            volume_price_confirm,
+            session_indicator,
+            np.clip(hl_range, 0, 0.05) / 0.05,
+            volatility_cluster,
+            intrabar_momentum,
+            sr_distance,
+            atr_value,
+            market_regime
+        ], dtype=float)
+        return state
+
+    def calculate_position_size(self, atr_value=None):
+        if atr_value is None:
+            atr_value = self._calculate_atr()
+        
+        atr_pips = atr_value * 10000
+        sl_distance_pips = max(atr_pips * 2, 10)
+        
+        session = self._get_session_indicator()
+        session_multiplier = 0.5 if session == 0.0 else 1.0
+        
+        risk_amount = self.balance * self.risk_percent * session_multiplier
+        pip_value_per_lot = 10.0
+        position_size = risk_amount / (sl_distance_pips * pip_value_per_lot)
+        return np.clip(position_size, self.min_position_size, self.max_position_size)
+
+    def set_sl_tp_levels(self, entry_price, direction):
+        atr_value = self._calculate_atr()
+        atr_pips = atr_value * 10000
+        dynamic_sl_pips = max(atr_pips * 2, 10)
+        dynamic_tp_pips = atr_pips * 3
+        
+        if direction == Direction.ENTER_LONG:
+            sl_price = entry_price - dynamic_sl_pips * self.pip_value
+            tp_price = entry_price + dynamic_tp_pips * self.pip_value
+        else:
+            sl_price = entry_price + dynamic_sl_pips * self.pip_value
+            tp_price = entry_price - dynamic_tp_pips * self.pip_value
+        return sl_price, tp_price
+
+    def check_sl_tp_hit(self, current_price):
+        if self.position is None:
+            return False, 0
+        if self.position.direction == Direction.ENTER_LONG:
+            if current_price <= self.position.sl_price:
+                return True, -1
+            elif current_price >= self.position.tp_price:
+                return True, 1
+        elif current_price >= self.position.sl_price:
+            return True, -1
+        elif current_price <= self.position.tp_price:
+            return True, 1
+        return False, 0
+
+    def play_step(self, action):
+        self.step_count += 1
+        reward = 0
+        done = False
+        if self.current_step >= len(self.data) - 1:
+            done = True
+            return reward, done, self.get_portfolio_value()
+        current_price = self.data.iloc[self.current_step]['close']
+        if self.position is not None:
+            sl_tp_hit, hit_type = self.check_sl_tp_hit(current_price)
+            if sl_tp_hit:
+                reward = self._close_position_sl_tp(current_price, hit_type)
+                self.current_step += 1
+                return reward, done, self.get_portfolio_value()
+        volatility_threshold = self._calculate_volatility_threshold()
+        current_volatility = self._get_current_volatility()
+        
+        if current_volatility >= volatility_threshold:
+            if action == Direction.ENTER_LONG:
+                if self.position is None:
+                    reward = self._execute_trade(current_price, Direction.ENTER_LONG)
+                elif self.position.direction == Direction.ENTER_SHORT:
+                    reward = self._close_position_manual(current_price)
+                    reward += self._execute_trade(current_price, Direction.ENTER_LONG)
+            elif action == Direction.ENTER_SHORT:
+                if self.position is None:
+                    reward = self._execute_trade(current_price, Direction.ENTER_SHORT)
+                elif self.position.direction == Direction.ENTER_LONG:
+                    reward = self._close_position_manual(current_price)
+                    reward += self._execute_trade(current_price, Direction.ENTER_SHORT)
+        
+        if action == Direction.CLOSE_FLAT and self.position is not None:
+            reward = self._close_position_manual(current_price)
+        self.current_step += 1
+        portfolio_value = self.get_portfolio_value()
+        drawdown = (self.max_balance - portfolio_value) / self.max_balance
+        if drawdown >= 0.2:
+            done = True
+            reward -= 50
+        if portfolio_value < self.initial_balance * 0.5:
+            done = True
+            reward -= 50
+        if portfolio_value > self.max_balance:
+            self.max_balance = portfolio_value
+        return reward, done, portfolio_value
+
+    def _close_position_manual(self, current_price):
+        if self.position is None:
+            return 0
+        
+        if self.position.direction == Direction.ENTER_LONG:
+            pnl_pct = (current_price - self.position.entry_price) / self.position.entry_price
+        else:
+            pnl_pct = (self.position.entry_price - current_price) / self.position.entry_price
+        
+        pnl_amount = pnl_pct * self.position.position_size * 100000 * self.position.entry_price
+        self.balance += pnl_amount
+        
+        self.trades_history.append({
+            'entry_price': self.position.entry_price,
+            'exit_price': current_price,
+            'direction': self.position.direction,
+            'pnl_pct': pnl_pct,
+            'pnl_amount': pnl_amount,
+            'step': self.current_step,
+            'hold_time': self.current_step - self.position.entry_step,
+            'position_size': self.position.position_size,
+            'exit_reason': 'MANUAL'
+        })
+        
+        self.position = None
+        return 25 if pnl_amount > 0 else -25
+
+    def _execute_trade(self, current_price, new_direction):
+        reward = 0
+        position_size = self.calculate_position_size()
+        sl_price, tp_price = self.set_sl_tp_levels(current_price, new_direction
+            )
+        self.position = Position(new_direction, current_price, self.
+            current_step, position_size, sl_price, tp_price)
+        commission = self.commission_pips * (position_size * 10.0)
+        self.balance -= commission
+        direction_name = ('LONG' if new_direction == Direction.ENTER_LONG else
+            'SHORT')
+        print(
+            f'🔵 TRADE ENTRY: {direction_name} @ ${current_price:.5f} | Size: {position_size:.2f} lots | SL: ${sl_price:.5f} | TP: ${tp_price:.5f} | Risk: ${position_size * current_price:.2f}'
+            )
+        return reward
+    
+    def _calculate_volatility_threshold(self):
+        if self.current_step >= 100:
+            returns_100 = self.data.iloc[self.current_step - 100:self.current_step + 1]['close'].pct_change().dropna()
+            if len(returns_100) > 0:
+                return returns_100.std() * 0.5
+        return 0.001
+    
+    def _get_current_volatility(self):
+        if self.current_step >= 20:
+            returns_20 = self.data.iloc[self.current_step - 20:self.current_step + 1]['close'].pct_change().dropna()
+            if len(returns_20) > 0:
+                return returns_20.std()
+        return 0.001
+
+    def _close_position_sl_tp(self, current_price, hit_type):
+        if self.position is None:
+            return 0
+        if self.position.direction == Direction.ENTER_LONG:
+            pnl_pct = (current_price - self.position.entry_price
+                ) / self.position.entry_price
+        else:
+            pnl_pct = (self.position.entry_price - current_price
+                ) / self.position.entry_price
+        pnl_amount = (pnl_pct * self.position.position_size * 100000 * self
+            .position.entry_price)
+        self.balance += pnl_amount
+        direction_name = ('LONG' if self.position.direction == Direction.
+            ENTER_LONG else 'SHORT')
+        hit_reason = '🛑 STOP LOSS' if hit_type == -1 else '🎯 TAKE PROFIT'
+        pips = abs(current_price - self.position.entry_price) / self.pip_value
+        print(
+            f'🔴 {hit_reason}: {direction_name} @ ${current_price:.5f} | Entry: ${self.position.entry_price:.5f} | {pips:.1f} pips | P&L: ${pnl_amount:.2f}'
+            )
+        reward = -100 if hit_type == -1 else 100
+        self.trades_history.append({'entry_price': self.position.
+            entry_price, 'exit_price': current_price, 'direction': self.
+            position.direction, 'pnl_pct': pnl_pct, 'pnl_amount':
+            pnl_amount, 'step': self.current_step, 'hold_time': self.
+            current_step - self.position.entry_step, 'position_size': self.
+            position.position_size, 'exit_reason': 'SL' if hit_type == -1 else
+            'TP'})
+        self.position = None
+        return reward
+
+    def get_portfolio_value(self):
+        portfolio_value = self.balance
+        if self.position is not None and self.current_step < len(self.data):
+            current_price = self.data.iloc[self.current_step]['close']
+            if self.position.direction == Direction.ENTER_LONG:
+                unrealized_pnl_pct = (current_price - self.position.entry_price
+                    ) / self.position.entry_price
+            else:
+                unrealized_pnl_pct = (self.position.entry_price - current_price
+                    ) / self.position.entry_price
+            unrealized_pnl = (unrealized_pnl_pct * self.position.
+                position_size * 100000 * self.position.entry_price)
+            portfolio_value += unrealized_pnl
+        return portfolio_value
+
+    def get_current_price(self):
+        if self.current_step < len(self.data):
+            return self.data.iloc[self.current_step]['close']
+        return 0
+
+    def get_trade_stats(self):
+        if not self.trades_history:
+            return {'total_trades': 0, 'win_rate': 0, 'avg_pnl': 0,
+                'total_pnl': 0, 'avg_hold_time': 0}
+        profitable_trades = [t for t in self.trades_history if t[
+            'pnl_amount'] > 0]
+        return {'total_trades': len(self.trades_history), 'win_rate': len(
+            profitable_trades) / len(self.trades_history), 'avg_pnl': np.
+            mean([t['pnl_amount'] for t in self.trades_history]),
+            'total_pnl': sum([t['pnl_amount'] for t in self.trades_history]
+            ), 'avg_hold_time': np.mean([t['hold_time'] for t in self.
+            trades_history])}
+    
+    def _calculate_volume_ratio(self):
+        if self.current_step < 20 or 'volume' not in self.data.columns:
+            return 0.5
+        current_volume = self.data.iloc[self.current_step]['volume']
+        avg_volume = self.data.iloc[self.current_step - 20:self.current_step + 1]['volume'].mean()
+        if avg_volume > 0:
+            ratio = current_volume / avg_volume
+            return np.clip(ratio / 3.0, 0, 1.0)
+        return 0.5
+    
+    def _calculate_volume_price_confirmation(self):
+        if self.current_step < 2 or 'volume' not in self.data.columns:
+            return 0.0
+        
+        current = self.data.iloc[self.current_step]
+        previous = self.data.iloc[self.current_step - 1]
+        
+        price_direction = 1 if current['close'] > previous['close'] else -1
+        volume_direction = 1 if current['volume'] > previous['volume'] else -1
+        
+        return price_direction * volume_direction * 0.5
+    
+    def _get_session_indicator(self):
+        if 'time' not in self.data.columns:
+            return 0.0
+        
+        try:
+            time_str = str(self.data.iloc[self.current_step]['time'])
+            if ':' in time_str:
+                hour = int(time_str.split(' ')[1].split(':')[0]) if ' ' in time_str else int(time_str.split(':')[0])
+            else:
+                hour = self.current_step % 24
+        except:
+            hour = self.current_step % 24
+        
+        if 21 <= hour or hour < 5:
+            return 0.0
+        elif 8 <= hour < 16:
+            return 1.0
+        elif 15 <= hour < 23:
+            return 2.0 if hour == 15 else 1.5
+        else:
+            return 0.5
+    
+    def _calculate_volatility_clustering(self):
+        if self.current_step < 20:
+            return 0.5
+        
+        current_hl = self.data.iloc[self.current_step]['high'] - self.data.iloc[self.current_step]['low']
+        avg_hl = np.mean([
+            self.data.iloc[i]['high'] - self.data.iloc[i]['low'] 
+            for i in range(max(0, self.current_step - 20), self.current_step)
+        ])
+        
+        if avg_hl > 0:
+            cluster = current_hl / avg_hl
+            return np.clip(cluster / 3.0, 0, 1.0)
+        return 0.5
+    
+    def _calculate_intrabar_momentum(self):
+        current = self.data.iloc[self.current_step]
+        hl_range = current['high'] - current['low']
+        
+        if hl_range > 0:
+            momentum = (current['close'] - current['open']) / hl_range
+            return np.clip(momentum, -1.0, 1.0)
+        return 0.0
+    
+    def _calculate_sr_distance(self):
+        if self.current_step < 50:
+            return 0.5
+        
+        lookback = min(50, self.current_step)
+        data_window = self.data.iloc[self.current_step - lookback:self.current_step + 1]
+        
+        highs = []
+        lows = []
+        
+        for i in range(2, len(data_window) - 2):
+            if (data_window.iloc[i]['high'] > data_window.iloc[i-1]['high'] and 
+                data_window.iloc[i]['high'] > data_window.iloc[i-2]['high'] and
+                data_window.iloc[i]['high'] > data_window.iloc[i+1]['high'] and
+                data_window.iloc[i]['high'] > data_window.iloc[i+2]['high']):
+                highs.append(data_window.iloc[i]['high'])
+            
+            if (data_window.iloc[i]['low'] < data_window.iloc[i-1]['low'] and 
+                data_window.iloc[i]['low'] < data_window.iloc[i-2]['low'] and
+                data_window.iloc[i]['low'] < data_window.iloc[i+1]['low'] and
+                data_window.iloc[i]['low'] < data_window.iloc[i+2]['low']):
+                lows.append(data_window.iloc[i]['low'])
+        
+        current_price = self.data.iloc[self.current_step]['close']
+        
+        if not highs and not lows:
+            return 0.5
+        
+        distances = []
+        if highs:
+            distances.extend([abs(current_price - h) for h in highs])
+        if lows:
+            distances.extend([abs(current_price - l) for l in lows])
+        
+        if distances:
+            min_distance = min(distances) / self.pip_value
+            return np.clip(min_distance / 100.0, 0, 1.0)
+        
+        return 0.5
+    
+    def _calculate_atr(self):
+        if self.current_step < 14:
+            return 0.001
+        
+        atr_values = []
+        for i in range(max(0, self.current_step - 14), self.current_step):
+            current = self.data.iloc[i]
+            previous = self.data.iloc[i-1] if i > 0 else current
+            
+            tr = max(
+                current['high'] - current['low'],
+                abs(current['high'] - previous['close']),
+                abs(current['low'] - previous['close'])
+            )
+            atr_values.append(tr)
+        
+        if atr_values:
+            atr = np.mean(atr_values)
+            return np.clip(atr / current['close'], 0, 0.01) * 100
+        
+        return 0.001
+    
+    def _detect_market_regime(self):
+        if self.current_step < 50:
+            return 0.5
+        
+        window = min(50, self.current_step)
+        prices = [self.data.iloc[i]['close'] for i in range(max(0, self.current_step - window), self.current_step)]
+        
+        if len(prices) < 20:
+            return 0.5
+        
+        bb_period = 20
+        bb_prices = prices[-bb_period:] if len(prices) >= bb_period else prices
+        bb_mean = np.mean(bb_prices)
+        bb_std = np.std(bb_prices)
+        
+        if bb_std == 0:
+            return 0.5
+        
+        current_price = prices[-1]
+        bb_upper = bb_mean + 2 * bb_std
+        bb_lower = bb_mean - 2 * bb_std
+        bb_width = (bb_upper - bb_lower) / bb_mean
+        
+        trend_lookback = min(20, len(prices))
+        if trend_lookback >= 10:
+            first_half = np.mean(prices[-trend_lookback:-trend_lookback//2])
+            second_half = np.mean(prices[-trend_lookback//2:])
+            trend_strength = abs(second_half - first_half) / first_half
+        else:
+            trend_strength = 0
+        
+        if bb_width < 0.02 and trend_strength < 0.01:
+            return 0.0
+        elif trend_strength > 0.03:
+            return 1.0
+        else:
+            return 0.5
+
+ForexGameAI = HierarchicalForexGameAI
+
+================================================
+File: grid_search_config.py
+================================================
+import itertools
+import random
+import json
+from datetime import datetime
+import os
+
+class V4GridSearchConfig:
+
+    def __init__(self, max_neurons_per_layer=55):
+        self.max_neurons = max_neurons_per_layer
+        self.results = []
+
+    def generate_layer_combinations(self):
+        combinations = []
+        for n1 in range(8, self.max_neurons + 1, 4):
+            combinations.append([n1])
+        for n1 in range(16, self.max_neurons + 1, 8):
+            for n2 in range(8, n1, 4):
+                combinations.append([n1, n2])
+        for n1 in range(32, self.max_neurons + 1, 8):
+            for n2 in range(16, n1, 8):
+                for n3 in range(8, n2, 4):
+                    combinations.append([n1, n2, n3])
+        for n1 in range(40, self.max_neurons + 1, 8):
+            for n2 in range(24, n1, 8):
+                for n3 in range(16, n2, 8):
+                    for n4 in range(8, n3, 4):
+                        combinations.append([n1, n2, n3, n4])
+        print(f'Generated {len(combinations)} layer combinations')
+        return combinations
+
+    def generate_training_combinations(self):
+        learning_rates = [0.01, 0.001, 0.0001]
+        gammas = [0.9, 0.95, 0.99]
+        epsilon_decays = [0.995, 0.9995, 0.9999]
+        batch_sizes = [512, 1000, 2000]
+        combinations = list(itertools.product(learning_rates, gammas,
+            epsilon_decays, batch_sizes))
+        print(f'Generated {len(combinations)} training combinations')
+        return combinations
+
+    def create_config(self, hidden_layers, lr, gamma, epsilon_decay, batch_size
+        ):
+        return {'state_size': 8, 'action_size': 3, 'network': {
+            'hidden_layers': hidden_layers, 'dropout_rate': 0.2,
+            'activation': 'relu', 'batch_norm': True}, 'training': {'lr':
+            lr, 'gamma': gamma, 'epsilon_start': 80, 'epsilon_decay':
+            epsilon_decay, 'epsilon_min': 0.01, 'memory_size': 100000,
+            'batch_size': batch_size, 'target_update_freq': 1000},
+            'advanced': {'double_dqn': True, 'dueling_dqn': True,
+            'prioritized_replay': True, 'noisy_networks': False,
+            'multi_step': 3, 'gradient_clipping': 1.0}, 'risk': {
+            'use_risk_features': True, 'adaptive_position_sizing': False,
+            'risk_based_rewards': True, 'stop_loss_integration': True},
+            'gpu': {'use_gpu': True, 'mixed_precision': True,
+            'data_parallel': True, 'device_ids': [0, 1]}}
+
+    def generate_search_space(self, max_configs=50):
+        layer_combos = self.generate_layer_combinations()
+        training_combos = self.generate_training_combinations()
+        if len(layer_combos) * len(training_combos) > max_configs:
+            layer_sample = random.sample(layer_combos, min(len(layer_combos
+                ), max_configs // 4))
+            training_sample = random.sample(training_combos, min(len(
+                training_combos), 4))
+        else:
+            layer_sample = layer_combos
+            training_sample = training_combos
+        configs = []
+        config_id = 0
+        for layers in layer_sample:
+            for lr, gamma, epsilon_decay, batch_size in training_sample:
+                config = self.create_config(layers, lr, gamma,
+                    epsilon_decay, batch_size)
+                config['config_id'] = config_id
+                config['config_name'] = (
+                    f"config_{config_id:03d}_layers_{'_'.join(map(str, layers))}"
+                    )
+                configs.append(config)
+                config_id += 1
+                if len(configs) >= max_configs:
+                    break
+            if len(configs) >= max_configs:
+                break
+        print(f'Generated {len(configs)} configurations for testing')
+        return configs
+
+    def save_results(self, results, filename=None):
+        if filename is None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'grid_search_results_{timestamp}.json'
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f'Results saved to {filename}')
+
+    def analyze_results(self, results):
+        if not results:
+            print('No results to analyze')
+            return
+        sorted_by_return = sorted(results, key=lambda x: x.get(
+            'final_return', -999), reverse=True)
+        sorted_by_winrate = sorted(results, key=lambda x: x.get('win_rate',
+            0), reverse=True)
+        sorted_by_sharpe = sorted(results, key=lambda x: x.get(
+            'sharpe_ratio', -999), reverse=True)
+        print('\n' + '=' * 80)
+        print('GRID SEARCH RESULTS ANALYSIS')
+        print('=' * 80)
+        print('\nTOP 5 BY TOTAL RETURN:')
+        for i, config in enumerate(sorted_by_return[:5]):
+            layers = config.get('network', {}).get('hidden_layers', [])
+            lr = config.get('training', {}).get('lr', 0)
+            print(f"{i + 1}. {config.get('config_name', 'unknown')}")
+            print(
+                f"   Layers: {layers} | LR: {lr} | Return: {config.get('final_return', 0):.2f}%"
+                )
+            print(
+                f"   Win Rate: {config.get('win_rate', 0):.2%} | Trades: {config.get('total_trades', 0)}"
+                )
+        print('\nTOP 5 BY WIN RATE:')
+        for i, config in enumerate(sorted_by_winrate[:5]):
+            layers = config.get('network', {}).get('hidden_layers', [])
+            lr = config.get('training', {}).get('lr', 0)
+            print(f"{i + 1}. {config.get('config_name', 'unknown')}")
+            print(
+                f"   Layers: {layers} | LR: {lr} | Win Rate: {config.get('win_rate', 0):.2%}"
+                )
+            print(
+                f"   Return: {config.get('final_return', 0):.2f}% | Trades: {config.get('total_trades', 0)}"
+                )
+        layer_performance = {}
+        for result in results:
+            layers = tuple(result.get('network', {}).get('hidden_layers', []))
+            if layers not in layer_performance:
+                layer_performance[layers] = []
+            layer_performance[layers].append(result.get('final_return', 0))
+        avg_performance = {layers: (sum(returns) / len(returns)) for layers,
+            returns in layer_performance.items()}
+        best_layers = sorted(avg_performance.items(), key=lambda x: x[1],
+            reverse=True)
+        print(f'\nBEST LAYER CONFIGURATIONS (by average return):')
+        for i, (layers, avg_return) in enumerate(best_layers[:10]):
+            param_count = self.calculate_parameters(list(layers))
+            print(
+                f'{i + 1}. {list(layers)} | Avg Return: {avg_return:.2f}% | Params: {param_count:,}'
+                )
+        return sorted_by_return[0] if sorted_by_return else None
+
+    def calculate_parameters(self, hidden_layers):
+        input_size = 8
+        output_size = 3
+        total_params = 0
+        prev_size = input_size
+        for layer_size in hidden_layers:
+            total_params += prev_size * layer_size + layer_size
+            prev_size = layer_size
+        total_params += prev_size * output_size + output_size
+        return total_params
+
+def create_optimal_configs():
+    return {'minimal': {'hidden_layers': [16, 8], 'params': 16 * 8 + 8 + 8 *
+        8 + 8 + 8 * 3 + 3}, 'small': {'hidden_layers': [32, 16], 'params': 
+        32 * 8 + 32 + 16 * 32 + 16 + 16 * 3 + 3}, 'medium': {
+        'hidden_layers': [48, 24, 12], 'params': 48 * 8 + 48 + 24 * 48 + 24 +
+        12 * 24 + 12 + 12 * 3 + 3}, 'balanced': {'hidden_layers': [55, 32, 
+        16], 'params': 55 * 8 + 55 + 32 * 55 + 32 + 16 * 32 + 16 + 16 * 3 + 3}}
+
+if __name__ == '__main__':
+    grid_search = V4GridSearchConfig(max_neurons_per_layer=55)
+    configs = grid_search.generate_search_space(max_configs=20)
+    print('\nSample configurations generated:')
+    for i, config in enumerate(configs[:5]):
+        layers = config['network']['hidden_layers']
+        lr = config['training']['lr']
+        params = grid_search.calculate_parameters(layers)
+        print(f"{i + 1}. {config['config_name']}")
+        print(f'   Layers: {layers} | LR: {lr} | Parameters: {params:,}')
+    with open('grid_search_configs.json', 'w') as f:
+        json.dump(configs, f, indent=2)
+    print(
+        f'\n✓ Saved {len(configs)} configurations to grid_search_configs.json')
+    print('✓ Ready for automated testing!')
+    optimal = create_optimal_configs()
+    print(f'\nHand-picked efficient configurations:')
+    for name, info in optimal.items():
+        print(
+            f"  {name}: {info['hidden_layers']} ({info['params']:,} parameters)"
+            )
+
+================================================
+File: grid_search_trainer.py
+================================================
+import torch
+import pandas as pd
+import numpy as np
+import json
+import time
+from datetime import datetime
+import os
+from grid_search_config import V4GridSearchConfig
+from agent import Agent
+from forex_game import ForexGameAI
+
+class GridSearchTrainer:
+
+    def __init__(self, data_path=None):
+        self.data_path = data_path
+        self.results = []
+        self.best_config = None
+        self.best_performance = -999
+
+    def load_data(self):
+        if not self.data_path:
+            from real_data_loader import load_real_gbpusd_data
+            try:
+                data, _ = load_real_gbpusd_data()
+                print(f'Loaded real GBPUSD data: {len(data)} candles')
+                return data
+            except Exception as e:
+                raise ValueError(f'No data path provided and real data loading failed: {e}')
+        
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f'Data file not found: {self.data_path}')
+        
+        df = pd.read_csv(self.data_path)
+        print(f'Loaded {len(df)} candles from {self.data_path}')
+        return df
+
+    def test_single_config(self, config, max_episodes=100):
+        print(f"\nTesting {config['config_name']}")
+        print(
+            f"Layers: {config['network']['hidden_layers']} | LR: {config['training']['lr']}"
+            )
+        data = self.load_data()
+        agent = Agent()
+        agent.model.config = config
+        agent.memory_size = config['training']['memory_size']
+        agent.batch_size = config['training']['batch_size']
+        agent.epsilon = config['training']['epsilon_start']
+        agent.epsilon_decay_rate = config['training']['epsilon_decay']
+        agent.epsilon_min = config['training']['epsilon_min']
+        game = ForexGameAI(data)
+        scores = []
+        portfolio_values = []
+        start_time = time.time()
+        for episode in range(max_episodes):
+            game.reset()
+            episode_score = 0
+            while True:
+                state = agent.get_state(game)
+                action = agent.get_action(state)
+                reward, done, portfolio_value = game.play_step(action.index(1))
+                next_state = agent.get_state(game)
+                agent.train_short_memory(state, action, reward, next_state,
+                    done)
+                agent.remember(state, action, reward, next_state, done)
+                episode_score += reward
+                if done:
+                    break
+            agent.train_long_memory()
+            scores.append(episode_score)
+            portfolio_values.append(portfolio_value)
+            if episode % 20 == 0:
+                avg_score = np.mean(scores[-10:]) if len(scores
+                    ) >= 10 else np.mean(scores)
+                print(
+                    f'Episode {episode:3d} | Score: {episode_score:6.1f} | Portfolio: ${portfolio_value:8.2f} | Avg: {avg_score:6.1f}'
+                    )
+        training_time = time.time() - start_time
+        final_portfolio = portfolio_values[-1] if portfolio_values else 10000
+        final_return = (final_portfolio - 10000) / 10000 * 100
+        stats = game.get_trade_stats()
+        result = {'config_id': config['config_id'], 'config_name': config[
+            'config_name'], 'network': config['network'], 'training':
+            config['training'], 'final_portfolio': final_portfolio,
+            'final_return': final_return, 'total_trades': stats.get(
+            'total_trades', 0), 'win_rate': stats.get('win_rate', 0),
+            'avg_pnl': stats.get('avg_pnl', 0), 'total_pnl': stats.get(
+            'total_pnl', 0), 'max_drawdown': stats.get('max_drawdown', 0),
+            'training_time': training_time, 'episodes_completed': max_episodes}
+        print(
+            f"Final Result: Return={final_return:.2f}% | Trades={stats.get('total_trades', 0)} | Win Rate={stats.get('win_rate', 0):.2%}"
+            )
+        return result
+
+    def run_grid_search(self, max_configs=20, episodes_per_config=50):
+        print('Starting Grid Search for V4 DQN Architecture')
+        print('=' * 60)
+        grid_config = V4GridSearchConfig(max_neurons_per_layer=55)
+        configs = grid_config.generate_search_space(max_configs=max_configs)
+        all_results = []
+        for i, config in enumerate(configs):
+            print(f'\n[{i + 1}/{len(configs)}] Testing Configuration')
+            try:
+                result = self.test_single_config(config, max_episodes=
+                    episodes_per_config)
+                all_results.append(result)
+                if result['final_return'] > self.best_performance:
+                    self.best_performance = result['final_return']
+                    self.best_config = config
+                    print(f"🏆 NEW BEST: {result['final_return']:.2f}% return!")
+            except Exception as e:
+                print(f'❌ Config failed: {e}')
+                continue
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        results_file = f'grid_search_results_{timestamp}.json'
+        with open(results_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"\n{'=' * 60}")
+        print('GRID SEARCH COMPLETED')
+        print(f"{'=' * 60}")
+        print(f'Tested {len(all_results)} configurations')
+        print(f'Results saved to: {results_file}')
+        if all_results:
+            grid_config.analyze_results(all_results)
+            if self.best_config:
+                print(f'\n🏆 BEST CONFIGURATION:')
+                print(f"Name: {self.best_config['config_name']}")
+                print(f"Layers: {self.best_config['network']['hidden_layers']}"
+                    )
+                print(f"LR: {self.best_config['training']['lr']}")
+                print(f'Performance: {self.best_performance:.2f}% return')
+                best_config_file = f'best_config_{timestamp}.json'
+                with open(best_config_file, 'w') as f:
+                    json.dump(self.best_config, f, indent=2)
+                print(f'Best config saved to: {best_config_file}')
+
+def main():
+    real_data_path = '/home/hung/Public/Test/FX/data/GBPUSD60.csv'
+    trainer = GridSearchTrainer(real_data_path)
+    trainer.run_grid_search(max_configs=15, episodes_per_config=30)
+
+if __name__ == '__main__':
+    main()
+
+================================================
+File: gym_env_adapter.py
+================================================
+import gymnasium as gym
+import numpy as np
+import pandas as pd
+from typing import Dict, Tuple, Any
+import warnings
+warnings.filterwarnings('ignore')
+try:
+    import gym_trading_env
+    GYM_TRADING_ENV_AVAILABLE = True
+except ImportError:
+    print('gym-trading-env not installed. Run: pip install gym-trading-env')
+    GYM_TRADING_ENV_AVAILABLE = False
+
+class V4GymTradingEnv:
+
+    def __init__(self, df: pd.DataFrame, initial_portfolio_value: float=10000):
+        if not GYM_TRADING_ENV_AVAILABLE:
+            raise ImportError('gym-trading-env is required but not installed')
+        self.df = self._prepare_dataframe(df)
+        self.initial_portfolio_value = initial_portfolio_value
+        self.env = gym.make('TradingEnv', df=self.df, positions=[0, 1],
+            trading_fees=0.0001, borrow_interest_rate=0,
+            portfolio_initial_value=initial_portfolio_value,
+            initial_position=0, max_episode_duration='max', verbose=0, name
+            ='V4_Forex')
+        self.current_position = 0
+        self.position_entry_price = 0
+        self.step_count = 0
+        print(
+            f'✓ V4 Gym Environment initialized with {len(self.df)} data points'
+            )
+
+    def _prepare_dataframe(self, df: pd.DataFrame) ->pd.DataFrame:
+        prepared_df = df.copy()
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in prepared_df.columns:
+                if col == 'volume':
+                    prepared_df['volume'] = 1000
+                else:
+                    raise ValueError(
+                        f"Required column '{col}' not found in dataframe")
+        if not isinstance(prepared_df.index, pd.DatetimeIndex):
+            if 'time' in prepared_df.columns:
+                prepared_df['time'] = pd.to_datetime(prepared_df['time'])
+                prepared_df.set_index('time', inplace=True)
+            else:
+                prepared_df.index = pd.date_range(start='2020-01-01',
+                    periods=len(prepared_df), freq='H')
+        prepared_df['feature_close'] = prepared_df['close'].pct_change(
+            ).fillna(0)
+        return prepared_df
+
+    def reset(self) ->np.ndarray:
+        obs, info = self.env.reset()
+        self.current_position = 0
+        self.position_entry_price = 0
+        self.step_count = 0
+        return self._convert_to_v4_state(obs, info)
+
+    def step(self, action: int) ->Tuple[np.ndarray, float, bool, bool, Dict]:
+        gym_action = self._convert_v4_action_to_gym(action)
+        obs, reward, done, truncated, info = self.env.step(gym_action)
+        v4_reward = self._convert_to_v4_reward(reward, info)
+        v4_state = self._convert_to_v4_state(obs, info)
+        self.step_count += 1
+        return v4_state, v4_reward, done, truncated, info
+
+    def _convert_v4_action_to_gym(self, v4_action: int) ->int:
+        if v4_action == 1:
+            return 1
+        else:
+            return 0
+
+    def _convert_to_v4_state(self, obs, info) ->np.ndarray:
+        try:
+            current_price = info.get('data_close', self.df['close'].iloc[-1])
+            lookback = min(50, len(self.df))
+            recent_data = self.df.tail(lookback)
+            price_high = recent_data['high'].max()
+            price_low = recent_data['low'].min()
+            if price_high > price_low:
+                price_level = (current_price - price_low) / (price_high -
+                    price_low)
+            else:
+                price_level = 0.5
+            if len(recent_data) > 5:
+                returns = recent_data['close'].pct_change().dropna()
+                volatility = returns.std() if len(returns) > 0 else 0.001
+                volatility = min(volatility * 100, 5.0) / 5.0
+            else:
+                volatility = 0.5
+            position_size = 1.0
+            portfolio_value = info.get('portfolio_valuation', self.
+                initial_portfolio_value)
+            immediate_risk = (portfolio_value - self.initial_portfolio_value
+                ) / self.initial_portfolio_value
+            immediate_risk = np.clip(immediate_risk, -0.2, 0.2)
+            state = np.array([price_level, volatility, position_size,
+                immediate_risk], dtype=float)
+            state = np.nan_to_num(state, nan=0.5)
+            return state
+        except Exception as e:
+            print(f'Error converting to V4 state: {e}')
+            return np.array([0.5, 0.5, 1.0, 0.0], dtype=float)
+
+    def _convert_to_v4_reward(self, gym_reward: float, info: Dict) ->float:
+        portfolio_value = info.get('portfolio_valuation', self.
+            initial_portfolio_value)
+        current_gym_position = info.get('position', 0)
+        if gym_reward > 0.001:
+            return 10.0
+        elif gym_reward < -0.001:
+            return -10.0
+        else:
+            return 0.0
+
+    def get_portfolio_info(self) ->Dict:
+        try:
+            dummy_obs, dummy_reward, dummy_done, dummy_truncated, info = (self
+                .env.step(0))
+            return {'portfolio_value': info.get('portfolio_valuation', self
+                .initial_portfolio_value), 'position': info.get('position',
+                0), 'real_position': info.get('real_position', 0), 'step':
+                info.get('step', self.step_count)}
+        except:
+            return {'portfolio_value': self.initial_portfolio_value,
+                'position': 0, 'real_position': 0, 'step': self.step_count}
+
+    def render(self):
+        try:
+            return self.env.render()
+        except:
+            pass
+
+class V4GymTrainer:
+
+    def __init__(self, data_path: str=None):
+        self.data_path = data_path
+        self.env = None
+
+    def create_environment(self, df: pd.DataFrame=None) ->V4GymTradingEnv:
+        if df is None:
+            df = self._load_or_generate_data()
+        self.env = V4GymTradingEnv(df)
+        return self.env
+
+    def _load_or_generate_data(self) ->pd.DataFrame:
+        if self.data_path and os.path.exists(self.data_path):
+            try:
+                df = pd.read_csv(self.data_path)
+                print(f'Loaded data from {self.data_path}: {len(df)} rows')
+                return df
+            except Exception as e:
+                print(f'Error loading data: {e}')
+        from real_data_loader import load_real_gbpusd_data
+        try:
+            data, _ = load_real_gbpusd_data()
+            print(f'Loaded real GBPUSD data for gym environment: {len(data)} candles')
+            return data
+        except Exception as e:
+            raise ValueError(f'No data path provided and real data loading failed: {e}')
+
+    def train_with_gym_env(self, episodes: int=100) ->Dict:
+        if not self.env:
+            raise ValueError(
+                'Environment not created. Call create_environment() first.')
+        print(f'Training with gym-trading-env backend for {episodes} episodes')
+        total_rewards = []
+        portfolio_values = []
+        for episode in range(episodes):
+            state = self.env.reset()
+            episode_reward = 0
+            steps = 0
+            while True:
+                action = np.random.randint(0, 3)
+                next_state, reward, done, truncated, info = self.env.step(
+                    action)
+                episode_reward += reward
+                steps += 1
+                if done or truncated:
+                    break
+                state = next_state
+            portfolio_info = self.env.get_portfolio_info()
+            portfolio_value = portfolio_info['portfolio_value']
+            total_rewards.append(episode_reward)
+            portfolio_values.append(portfolio_value)
+            if episode % 10 == 0:
+                avg_reward = np.mean(total_rewards[-10:])
+                avg_portfolio = np.mean(portfolio_values[-10:])
+                print(
+                    f'Episode {episode}: Avg Reward: {avg_reward:.2f}, Avg Portfolio: ${avg_portfolio:.2f}'
+                    )
+        return {'total_rewards': total_rewards, 'portfolio_values':
+            portfolio_values, 'final_portfolio': portfolio_values[-1] if
+            portfolio_values else 10000}
+
+def main():
+    if not GYM_TRADING_ENV_AVAILABLE:
+        print(
+            'gym-trading-env not available. Install with: pip install gym-trading-env'
+            )
+        return
+    print('V4 Gym Trading Environment Demo')
+    print('=' * 40)
+    trainer = V4GymTrainer()
+    env = trainer.create_environment()
+    results = trainer.train_with_gym_env(episodes=50)
+    print(f'\nDemo Results:')
+    print(f"Final Portfolio: ${results['final_portfolio']:.2f}")
+    print(f"Return: {(results['final_portfolio'] - 10000) / 10000 * 100:.2f}%")
+
+if __name__ == '__main__':
+    import os
+    main()
+
+================================================
+File: helper.py
+================================================
+import matplotlib.pyplot as plt
+from IPython import display
+import numpy as np
+plt.ion()
+
+def plot(scores, mean_scores, portfolio_values=None):
+    display.clear_output(wait=True)
+    display.display(plt.gcf())
+    plt.clf()
+    if portfolio_values is not None:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        ax1.plot(portfolio_values, 'b-', label='Portfolio Value')
+        ax1.axhline(y=10000, color='gray', linestyle='--', alpha=0.7, label
+            ='Initial Balance')
+        ax1.set_title('Portfolio Value Progress')
+        ax1.set_ylabel('Portfolio Value ($)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        if len(portfolio_values) > 0:
+            ax1.text(len(portfolio_values) - 1, portfolio_values[-1],
+                f'${portfolio_values[-1]:.0f}', ha='right', va='bottom')
+        ax2.plot(scores, 'g-', label='Return %')
+        ax2.plot(mean_scores, 'r-', label='Average Return %')
+        ax2.axhline(y=0, color='gray', linestyle='--', alpha=0.7)
+        ax2.set_title('Returns Progress')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Return (%)')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        if len(scores) > 0:
+            ax2.text(len(scores) - 1, scores[-1], f'{scores[-1]:.1f}%', ha=
+                'right', va='bottom')
+        if len(mean_scores) > 0:
+            ax2.text(len(mean_scores) - 1, mean_scores[-1],
+                f'{mean_scores[-1]:.1f}%', ha='right', va='top')
+    else:
+        plt.title('Training Progress')
+        plt.xlabel('Number of Games')
+        plt.ylabel('Return (%)')
+        plt.plot(scores, 'b-', label='Return')
+        plt.plot(mean_scores, 'r-', label='Average Return')
+        plt.ylim(ymin=-50, ymax=50)
+        if len(scores) > 0:
+            plt.text(len(scores) - 1, scores[-1], str(f'{scores[-1]:.1f}%'))
+        if len(mean_scores) > 0:
+            plt.text(len(mean_scores) - 1, mean_scores[-1], str(
+                f'{mean_scores[-1]:.1f}%'))
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.1)
+
+def plot_trade_analysis(trades_history):
+    if not trades_history:
+        print('No trades to analyze')
+        return
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    pnl_amounts = [trade['pnl_amount'] for trade in trades_history]
+    pnl_pcts = [(trade['pnl_pct'] * 100) for trade in trades_history]
+    directions = [trade['direction'] for trade in trades_history]
+    ax1.hist(pnl_amounts, bins=20, alpha=0.7, color='blue', edgecolor='black')
+    ax1.axvline(x=0, color='red', linestyle='--', alpha=0.7)
+    ax1.set_title('P&L Distribution')
+    ax1.set_xlabel('P&L Amount ($)')
+    ax1.set_ylabel('Frequency')
+    ax1.grid(True, alpha=0.3)
+    cumulative_pnl = np.cumsum(pnl_amounts)
+    ax2.plot(cumulative_pnl, 'g-', linewidth=2)
+    ax2.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+    ax2.set_title('Cumulative P&L')
+    ax2.set_xlabel('Trade Number')
+    ax2.set_ylabel('Cumulative P&L ($)')
+    ax2.grid(True, alpha=0.3)
+    wins_losses = [(1 if pnl > 0 else -1) for pnl in pnl_amounts]
+    ax3.bar(range(len(wins_losses)), wins_losses, color=[('green' if w > 0 else
+        'red') for w in wins_losses])
+    ax3.set_title('Win/Loss Pattern')
+    ax3.set_xlabel('Trade Number')
+    ax3.set_ylabel('Win (+1) / Loss (-1)')
+    ax3.grid(True, alpha=0.3)
+    profitable_trades = len([p for p in pnl_amounts if p > 0])
+    win_rate = profitable_trades / len(pnl_amounts) * 100
+    avg_win = np.mean([p for p in pnl_amounts if p > 0]
+        ) if profitable_trades > 0 else 0
+    avg_loss = np.mean([p for p in pnl_amounts if p < 0]) if len(pnl_amounts
+        ) - profitable_trades > 0 else 0
+    stats_text = f"""Trade Statistics:
+Total Trades: {len(trades_history)}
+Win Rate: {win_rate:.1f}%
+Avg Win: ${avg_win:.2f}
+Avg Loss: ${avg_loss:.2f}
+Total P&L: ${sum(pnl_amounts):.2f}
+Best Trade: ${max(pnl_amounts):.2f}
+Worst Trade: ${min(pnl_amounts):.2f}"""
+    ax4.text(0.05, 0.95, stats_text, transform=ax4.transAxes, fontsize=10,
+        verticalalignment='top', bbox=dict(boxstyle='round', facecolor=
+        'wheat', alpha=0.5))
+    ax4.set_xlim(0, 1)
+    ax4.set_ylim(0, 1)
+    ax4.axis('off')
+    ax4.set_title('Statistics Summary')
+    plt.tight_layout()
+    plt.show()
+
+def save_performance_report(agent, game, filename='v4_performance_report.txt'):
+    stats = game.get_trade_stats()
+    portfolio_value = game.get_portfolio_value()
+    total_return = (portfolio_value - game.initial_balance
+        ) / game.initial_balance * 100
+    report = f"""
+V4 Forex DQN Performance Report
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'=' * 50}
+
+TRAINING SUMMARY:
+- Episodes Completed: {agent.n_games}
+- Final Epsilon: {agent.epsilon}
+- Memory Buffer Size: {len(agent.memory)}
+
+PORTFOLIO PERFORMANCE:
+- Initial Balance: ${game.initial_balance:,.2f}
+- Final Portfolio Value: ${portfolio_value:,.2f}
+- Total Return: {total_return:.2f}%
+- Max Portfolio Value: ${game.max_balance:,.2f}
+- Max Drawdown: {(game.max_balance - portfolio_value) / game.max_balance * 100:.2f}%
+
+TRADING STATISTICS:
+- Total Trades: {stats['total_trades']}
+- Win Rate: {stats['win_rate']:.2%}
+- Average P&L per Trade: ${stats['avg_pnl']:.2f}
+- Total P&L: ${stats['total_pnl']:.2f}
+
+RISK METRICS:
+- Position Size: {game.position_size} lots (fixed)
+- Risk per Trade: ~2% of account balance
+- Maximum Single Loss: ${min([t['pnl_amount'] for t in game.trades_history]) if game.trades_history else 0:.2f}
+- Maximum Single Gain: ${max([t['pnl_amount'] for t in game.trades_history]) if game.trades_history else 0:.2f}
+
+MODEL ARCHITECTURE:
+- Input Features: 4 (price_level, volatility, position_size, immediate_risk)
+- Hidden Layer: 256 neurons
+- Output Actions: 3 (Hold, Buy, Sell)
+- Learning Rate: {LR}
+- Discount Factor: {agent.gamma}
+
+PHILOSOPHY VALIDATION:
+✓ Simplicity: Only 4 input features vs V3's complex indicators
+✓ Fixed Risk: Consistent 0.01 lot position sizing
+✓ Immediate Feedback: Binary profit/loss rewards
+✓ No Prediction: Pure timing-based approach
+✓ Risk Management: Built-in drawdown protection
+
+{'=' * 50}================================================
+File: model.py
+================================================
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+import os
+from config import V4Config, get_activation_function, create_model_config
+
+class Linear_QNet(nn.Module):
+
+    def __init__(self, input_size=13, output_size=3, config=None):
+        super().__init__()
+        if config is None:
+            config = create_model_config('simple', 'fast')
+        self.config = config
+        network_config = config['network']
+        self.layers = nn.ModuleList()
+        self.dropouts = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        prev_size = input_size
+        for hidden_size in network_config['hidden_layers']:
+            self.layers.append(nn.Linear(prev_size, hidden_size))
+            if network_config['batch_norm']:
+                self.batch_norms.append(nn.BatchNorm1d(hidden_size))
+            else:
+                self.batch_norms.append(None)
+            if network_config['dropout_rate'] > 0:
+                self.dropouts.append(nn.Dropout(network_config['dropout_rate'])
+                    )
+            else:
+                self.dropouts.append(None)
+            prev_size = hidden_size
+        self.output_layer = nn.Linear(prev_size, output_size)
+        self.activation = get_activation_function(network_config['activation'])
+        if config['advanced']['dueling_dqn']:
+            self._setup_dueling_architecture(prev_size, output_size)
+        self.device = self._setup_device(config)
+        self.to(self.device)
+        print(f'✓ V4 DQN Model initialized:')
+        print(
+            f"  Architecture: {[input_size] + network_config['hidden_layers'] + [output_size]}"
+            )
+        print(f"  Activation: {network_config['activation']}")
+        print(f"  Dropout: {network_config['dropout_rate']}")
+        print(f"  Batch Norm: {network_config['batch_norm']}")
+        print(f"  Dueling DQN: {config['advanced']['dueling_dqn']}")
+        print(f'  Device: {self.device}')
+        print(f'  Parameters: {sum(p.numel() for p in self.parameters()):,}')
+
+    def _setup_device(self, config):
+        if not config.get('gpu', {}).get('use_gpu', True
+            ) or not torch.cuda.is_available():
+            return torch.device('cpu')
+        if torch.cuda.device_count() > 1:
+            print(
+                f'  Using {torch.cuda.device_count()} GPUs: {[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]}'
+                )
+            return torch.device('cuda')
+        else:
+            device_name = torch.cuda.get_device_name(0)
+            print(f'  Using single GPU: {device_name}')
+            return torch.device('cuda:0')
+
+    def _setup_dueling_architecture(self, feature_size, action_size):
+        self.value_stream = nn.Linear(feature_size, 1)
+        self.advantage_stream = nn.Linear(feature_size, action_size)
+
+    def forward(self, x):
+        if not x.is_cuda and self.device.type == 'cuda':
+            x = x.to(self.device)
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if self.batch_norms[i] is not None and x.size(0) > 1:
+                x = self.batch_norms[i](x)
+            x = self.activation(x)
+            if self.dropouts[i] is not None:
+                x = self.dropouts[i](x)
+        if self.config['advanced']['dueling_dqn']:
+            value = self.value_stream(x)
+            advantage = self.advantage_stream(x)
+            q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+            return q_values
+        else:
+            return self.output_layer(x)
+
+    def save(self, file_name='model.pth'):
+        model_folder_path = './model'
+        if not os.path.exists(model_folder_path):
+            os.makedirs(model_folder_path)
+        file_name = os.path.join(model_folder_path, file_name)
+        torch.save({'model_state_dict': self.state_dict(), 'config': self.
+            config}, file_name)
+        print(f'✓ Model saved: {file_name}')
+
+    def load(self, file_name='model.pth'):
+        model_folder_path = './model'
+        file_path = os.path.join(model_folder_path, file_name)
+        if os.path.exists(file_path):
+            checkpoint = torch.load(file_path)
+            self.load_state_dict(checkpoint['model_state_dict'])
+            self.config = checkpoint.get('config', create_model_config(
+                'simple', 'fast'))
+            print(f'✓ Model loaded: {file_path}')
+            return True
+        else:
+            print(f'✗ Model file not found: {file_path}')
+            return False
+
+class QTrainer:
+
+    def __init__(self, model, config=None):
+        if config is None:
+            config = create_model_config('simple', 'fast')
+        self.config = config
+        training_config = config['training']
+        self.lr = training_config['lr']
+        self.gamma = training_config['gamma']
+        self.model = model
+        if config['advanced']['double_dqn']:
+            self.target_model = Linear_QNet(input_size=config['state_size'],
+                output_size=config['action_size'], config=config)
+            self.target_model.load_state_dict(model.state_dict())
+            self.target_update_freq = training_config['target_update_freq']
+            self.update_count = 0
+        else:
+            self.target_model = None
+        self.device = model.device
+        self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
+        self.criterion = nn.MSELoss()
+        self.gradient_clipping = config['advanced']['gradient_clipping']
+        print(f'✓ V4 QTrainer initialized:')
+        print(f'  Learning Rate: {self.lr}')
+        print(f'  Gamma: {self.gamma}')
+        print(f"  Double DQN: {config['advanced']['double_dqn']}")
+        print(f'  Gradient Clipping: {self.gradient_clipping}')
+
+    def train_step(self, state, action, reward, next_state, done):
+        if isinstance(state, (list, tuple)):
+            state = torch.tensor(np.array(state), dtype=torch.float).to(self
+                .device)
+        else:
+            state = torch.as_tensor(state, dtype=torch.float).to(self.device)
+        if isinstance(next_state, (list, tuple)):
+            next_state = torch.tensor(np.array(next_state), dtype=torch.float
+                ).to(self.device)
+        else:
+            next_state = torch.as_tensor(next_state, dtype=torch.float).to(self
+                .device)
+        if isinstance(action, (list, tuple)):
+            action = torch.tensor(np.array(action), dtype=torch.long).to(self
+                .device)
+        else:
+            action = torch.as_tensor(action, dtype=torch.long).to(self.device)
+        if isinstance(reward, (list, tuple)):
+            reward = torch.tensor(np.array(reward), dtype=torch.float).to(self
+                .device)
+        else:
+            reward = torch.as_tensor(reward, dtype=torch.float).to(self.device)
+        if len(state.shape) == 1:
+            state = torch.unsqueeze(state, 0)
+            next_state = torch.unsqueeze(next_state, 0)
+            action = torch.unsqueeze(action, 0)
+            reward = torch.unsqueeze(reward, 0)
+            done = done,
+        pred = self.model(state)
+        target = pred.clone()
+        for idx in range(len(done)):
+            Q_new = reward[idx]
+            if not done[idx]:
+                if self.target_model is not None:
+                    if len(next_state.shape) == 1:
+                        next_q_main = self.model(next_state)
+                        best_action = torch.argmax(next_q_main).item()
+                        next_q_target = self.target_model(next_state)
+                        Q_new = reward[idx] + self.gamma * next_q_target[
+                            best_action]
+                    else:
+                        next_q_main = self.model(next_state[idx].unsqueeze(0))
+                        best_action = torch.argmax(next_q_main).item()
+                        next_q_target = self.target_model(next_state[idx].
+                            unsqueeze(0))
+                        Q_new = reward[idx] + self.gamma * next_q_target[0][
+                            best_action]
+                elif len(next_state.shape) == 1:
+                    Q_new = reward[idx] + self.gamma * torch.max(self.model
+                        (next_state))
+                else:
+                    Q_new = reward[idx] + self.gamma * torch.max(self.model
+                        (next_state[idx].unsqueeze(0)))
+            if isinstance(action[idx], (int, torch.Tensor)) and action[idx
+                ].dim() == 0:
+                target[idx][action[idx]] = Q_new
+            elif hasattr(action[idx], '__len__') and len(action[idx]) > 1:
+                if torch.is_tensor(action[idx]):
+                    action_idx = torch.argmax(action[idx].detach().clone()
+                        ).item()
+                else:
+                    action_idx = torch.argmax(torch.as_tensor(action[idx])
+                        ).item()
+                target[idx][action_idx] = Q_new
+            else:
+                if isinstance(action[idx], list):
+                    action_idx = action[idx].index(1) if 1 in action[idx
+                        ] else 0
+                elif torch.is_tensor(action[idx]):
+                    action_idx = torch.argmax(action[idx].detach().clone()
+                        ).item()
+                else:
+                    action_idx = torch.argmax(torch.as_tensor(action[idx])
+                        ).item()
+                target[idx][action_idx] = Q_new
+        self.optimizer.zero_grad()
+        loss = self.criterion(target, pred)
+        loss.backward()
+        if self.gradient_clipping > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.
+                gradient_clipping)
+        self.optimizer.step()
+        if self.target_model is not None:
+            self.update_count += 1
+            if self.update_count % self.target_update_freq == 0:
+                self.target_model.load_state_dict(self.model.state_dict())
+        return loss.item()
+
+    def update_target_network(self):
+        if self.target_model is not None:
+            self.target_model.load_state_dict(self.model.state_dict())
+            print('✓ Target network updated')
+
+def create_model_from_config(config_name='testing'):
+    from config import PRESET_CONFIGS
+    if config_name not in PRESET_CONFIGS:
+        print(f"Warning: Unknown config '{config_name}', using 'testing'")
+        config_name = 'testing'
+    config = PRESET_CONFIGS[config_name]
+    model = Linear_QNet(input_size=config['state_size'], output_size=config
+        ['action_size'], config=config)
+    trainer = QTrainer(model, config)
+    print(f'✓ Created {config_name.upper()} configuration')
+    return model, trainer, config
+
+================================================
+File: parallel_grid_search.py
+================================================
+import torch
+import torch.multiprocessing as mp
+import pandas as pd
+import numpy as np
+import json
+import time
+from datetime import datetime
+import os
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from grid_search_config import V4GridSearchConfig
+from agent import Agent
+from forex_game import ForexGameAI
+
+class ParallelGridSearchTrainer:
+
+    def __init__(self, data_path=None, num_gpus=2):
+        self.data_path = data_path
+        self.num_gpus = num_gpus
+        self.results = []
+        self.data = None
+
+    def load_data(self):
+        if self.data is None:
+            if self.data_path and os.path.exists(self.data_path):
+                self.data = pd.read_csv(self.data_path)
+                print(f'Loaded {len(self.data)} candles from {self.data_path}')
+            else:
+                from real_data_loader import load_real_gbpusd_data
+                try:
+                    self.data, _ = load_real_gbpusd_data()
+                    print(f'Loaded real GBPUSD data: {len(self.data)} candles')
+                except Exception as e:
+                    raise ValueError(f'No data path provided and real data loading failed: {e}')
+        return self.data
+
+    def train_single_config(self, config, gpu_id, max_episodes=50):
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f'cuda:{gpu_id}')
+        print(f"🚀 GPU {gpu_id}: Starting {config['config_name']}")
+        print(
+            f"🔧 GPU {gpu_id}: Layers {config['network']['hidden_layers']} | LR {config['training']['lr']}"
+            )
+        data = self.load_data()
+        config['gpu']['device_ids'] = [gpu_id]
+        agent = Agent()
+        agent.model.to(device)
+        agent.model.device = device
+        agent.model.config = config
+        agent.memory_size = config['training']['memory_size']
+        agent.batch_size = config['training']['batch_size']
+        agent.epsilon = config['training']['epsilon_start']
+        agent.epsilon_decay_rate = config['training']['epsilon_decay']
+        agent.epsilon_min = config['training']['epsilon_min']
+        game = ForexGameAI(data)
+        scores = []
+        portfolio_values = []
+        start_time = time.time()
+        for episode in range(max_episodes):
+            game.reset()
+            episode_score = 0
+            while True:
+                state = agent.get_state(game)
+                action = agent.get_action(state)
+                reward, done, portfolio_value = game.play_step(action.index(1))
+                next_state = agent.get_state(game)
+                agent.train_short_memory(state, action, reward, next_state,
+                    done)
+                agent.remember(state, action, reward, next_state, done)
+                episode_score += reward
+                if done:
+                    break
+            agent.train_long_memory()
+            scores.append(episode_score)
+            portfolio_values.append(portfolio_value)
+            if episode % 10 == 0:
+                avg_score = np.mean(scores[-10:]) if len(scores
+                    ) >= 10 else np.mean(scores)
+                print(
+                    f'📊 GPU {gpu_id}: Ep {episode:2d} | Score: {episode_score:6.1f} | Portfolio: ${portfolio_value:8.2f}'
+                    )
+        training_time = time.time() - start_time
+        final_portfolio = portfolio_values[-1] if portfolio_values else 10000
+        final_return = (final_portfolio - 10000) / 10000 * 100
+        stats = game.get_trade_stats()
+        result = {'config_id': config['config_id'], 'config_name': config[
+            'config_name'], 'network': config['network'], 'training':
+            config['training'], 'gpu_id': gpu_id, 'final_portfolio':
+            final_portfolio, 'final_return': final_return, 'total_trades':
+            stats.get('total_trades', 0), 'win_rate': stats.get('win_rate',
+            0), 'avg_pnl': stats.get('avg_pnl', 0), 'total_pnl': stats.get(
+            'total_pnl', 0), 'training_time': training_time,
+            'episodes_completed': max_episodes}
+        print(
+            f"✅ GPU {gpu_id}: {config['config_name']} | Return: {final_return:.2f}% | Trades: {stats.get('total_trades', 0)} | Time: {training_time:.1f}s"
+            )
+        return result
+
+    def run_parallel_grid_search(self, max_configs=24, episodes_per_config=
+        30, configs_per_gpu=6):
+        print('🔥 PARALLEL GRID SEARCH - MAXIMUM GPU UTILIZATION')
+        print('=' * 80)
+        print(
+            f'🎯 Target: {self.num_gpus} GPUs × {configs_per_gpu} configs = {self.num_gpus * configs_per_gpu} parallel trainings'
+            )
+        self.load_data()
+        grid_config = V4GridSearchConfig(max_neurons_per_layer=144)
+        all_configs = grid_config.generate_search_space(max_configs=max_configs
+            )
+        results = []
+        with ThreadPoolExecutor(max_workers=self.num_gpus * configs_per_gpu
+            ) as executor:
+            futures = []
+            for i, config in enumerate(all_configs):
+                gpu_id = i % self.num_gpus
+                future = executor.submit(self.train_single_config, config,
+                    gpu_id, episodes_per_config)
+                futures.append(future)
+                print(f"📤 Submitted {config['config_name']} to GPU {gpu_id}")
+                if len(futures) >= self.num_gpus * configs_per_gpu:
+                    break
+            print(f'\n🚀 LAUNCHED {len(futures)} PARALLEL TRAININGS')
+            print(
+                f'⚡ Expected GPU utilization: ~{len(futures) / self.num_gpus * 14:.0f}% per GPU'
+                )
+            for i, future in enumerate(as_completed(futures)):
+                try:
+                    result = future.result()
+                    results.append(result)
+                    print(
+                        f"🏁 Completed {i + 1}/{len(futures)}: {result['config_name']} | Return: {result['final_return']:.2f}%"
+                        )
+                except Exception as e:
+                    print(f'❌ Training failed: {e}')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        results_file = f'parallel_grid_search_results_{timestamp}.json'
+        with open(results_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\n{'=' * 80}")
+        print('🏆 PARALLEL GRID SEARCH COMPLETED')
+        print(f"{'=' * 80}")
+        print(f'✅ Completed {len(results)}/{len(futures)} configurations')
+        print(f'💾 Results saved to: {results_file}')
+        if results:
+            self.analyze_parallel_results(results)
+            best_result = max(results, key=lambda x: x['final_return'])
+            print(f'\n🥇 BEST RESULT:')
+            print(f"   Config: {best_result['config_name']}")
+            print(f"   Layers: {best_result['network']['hidden_layers']}")
+            print(f"   GPU: {best_result['gpu_id']}")
+            print(f"   Return: {best_result['final_return']:.2f}%")
+            print(f"   Time: {best_result['training_time']:.1f}s")
+
+    def analyze_parallel_results(self, results):
+        if not results:
+            return
+        print(f'\n📈 PERFORMANCE ANALYSIS:')
+        sorted_results = sorted(results, key=lambda x: x['final_return'],
+            reverse=True)
+        print(f'\n🏆 TOP 5 PERFORMERS:')
+        for i, result in enumerate(sorted_results[:5]):
+            print(f"   {i + 1}. {result['config_name']}")
+            print(f"      Layers: {result['network']['hidden_layers']}")
+            print(
+                f"      Return: {result['final_return']:.2f}% | GPU: {result['gpu_id']} | Time: {result['training_time']:.1f}s"
+                )
+        gpu_performance = {}
+        for result in results:
+            gpu = result['gpu_id']
+            if gpu not in gpu_performance:
+                gpu_performance[gpu] = []
+            gpu_performance[gpu].append(result['final_return'])
+        print(f'\n🎮 GPU PERFORMANCE:')
+        for gpu_id, returns in gpu_performance.items():
+            avg_return = np.mean(returns)
+            max_return = max(returns)
+            count = len(returns)
+            print(
+                f'   GPU {gpu_id}: {count} configs | Avg: {avg_return:.2f}% | Best: {max_return:.2f}%'
+                )
+        layer_performance = {}
+        for result in results:
+            layers = tuple(result['network']['hidden_layers'])
+            if layers not in layer_performance:
+                layer_performance[layers] = []
+            layer_performance[layers].append(result['final_return'])
+        avg_layer_performance = {layers: np.mean(returns) for layers,
+            returns in layer_performance.items()}
+        best_layers = sorted(avg_layer_performance.items(), key=lambda x: x
+            [1], reverse=True)
+        print(f'\n🧠 BEST LAYER ARCHITECTURES:')
+        for i, (layers, avg_return) in enumerate(best_layers[:5]):
+            param_count = self.calculate_parameters(list(layers))
+            print(
+                f'   {i + 1}. {list(layers)} | Avg Return: {avg_return:.2f}% | Params: {param_count:,}'
+                )
+
+    def calculate_parameters(self, hidden_layers):
+        input_size = 8
+        output_size = 3
+        total_params = 0
+        prev_size = input_size
+        for layer_size in hidden_layers:
+            total_params += prev_size * layer_size + layer_size
+            prev_size = layer_size
+        total_params += prev_size * output_size + output_size
+        return total_params
+
+def main():
+    mp.set_start_method('spawn', force=True)
+    real_data_path = '/home/hung/Public/Test/FX/data/GBPUSD60.csv'
+    trainer = ParallelGridSearchTrainer(real_data_path, num_gpus=2)
+    trainer.run_parallel_grid_search(max_configs=24, episodes_per_config=25,
+        configs_per_gpu=6)
+
+if __name__ == '__main__':
+    main()
+
+================================================
+File: real_data_loader.py
+================================================
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+def load_real_gbpusd_data(h1_path=
+    '/home/hung/Public/Test/FX/data/GBPUSD60.csv', d1_path=
+    '/home/hung/Public/Test/FX/data/GBPUSD1440.csv', start_samples=1000,
+    total_samples=None):
+    print(f'Loading real GBPUSD data...')
+    print(f'H1 path: {h1_path}')
+    print(f'D1 path: {d1_path}')
+    h1_data = pd.read_csv(h1_path)
+    d1_data = pd.read_csv(d1_path)
+    print(f'H1 data loaded: {len(h1_data):,} records')
+    print(f'D1 data loaded: {len(d1_data):,} records')
+    h1_data['time'] = pd.to_datetime(h1_data['time'])
+    d1_data['time'] = pd.to_datetime(d1_data['time'])
+    h1_data = h1_data.sort_values('time').reset_index(drop=True)
+    d1_data = d1_data.sort_values('time').reset_index(drop=True)
+    if total_samples is None:
+        total_samples = len(h1_data) - start_samples
+        print(f'Using full dataset: {total_samples:,} samples')
+    elif len(h1_data) < start_samples + total_samples:
+        print(
+            f'Warning: Not enough H1 data. Available: {len(h1_data)}, Requested: {start_samples + total_samples}'
+            )
+        total_samples = len(h1_data) - start_samples
+    
+    h1_filtered = h1_data.copy()
+    h1_filtered = h1_filtered.dropna()
+    
+    if 'volume' in h1_filtered.columns:
+        volume_threshold = h1_filtered['volume'].quantile(0.1)
+        h1_filtered = h1_filtered[h1_filtered['volume'] > volume_threshold]
+    
+    h1_filtered['hour'] = h1_filtered['time'].dt.hour
+    weekend_mask = ~((h1_filtered['time'].dt.dayofweek >= 5) & (h1_filtered['hour'] >= 22))
+    h1_filtered = h1_filtered[weekend_mask]
+    
+    h1_subset = h1_filtered.iloc[start_samples:start_samples + total_samples].copy()
+    h1_subset = h1_subset.reset_index(drop=True)
+    print(
+        f"Using H1 data from {h1_subset['time'].iloc[0]} to {h1_subset['time'].iloc[-1]}"
+        )
+    print(
+        f"Price range: {h1_subset['close'].min():.5f} - {h1_subset['close'].max():.5f}"
+        )
+    print(
+        f"Total price movement: {(h1_subset['close'].iloc[-1] / h1_subset['close'].iloc[0] - 1) * 100:.2f}%"
+        )
+    return h1_subset, d1_data
+
+def get_data_statistics(data):
+    stats = {'total_records': len(data), 'date_range':
+        f"{data['time'].iloc[0]} to {data['time'].iloc[-1]}", 'price_min':
+        data['close'].min(), 'price_max': data['close'].max(), 'price_mean':
+        data['close'].mean(), 'price_std': data['close'].std(),
+        'total_return_pct': (data['close'].iloc[-1] / data['close'].iloc[0] -
+        1) * 100, 'avg_volume': data['volume'].mean() if 'volume' in data.
+        columns else 0}
+    return stats
+
+if __name__ == '__main__':
+    h1_data, d1_data = load_real_gbpusd_data()
+    print('\nH1 Data Statistics:')
+    h1_stats = get_data_statistics(h1_data)
+    for key, value in h1_stats.items():
+        print(f'  {key}: {value}')
+    print('\nD1 Data Statistics:')
+    d1_stats = get_data_statistics(d1_data)
+    for key, value in d1_stats.items():
+        print(f'  {key}: {value}')
+
+================================================
+File: simple_risk_manager.py
+================================================
+import numpy as np
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
+from dataclasses import dataclass
+
+@dataclass
+class V4RiskMetrics:
+    account_balance: float
+    current_drawdown: float
+    daily_pnl: float
+    total_trades: int
+    win_rate: float
+    risk_violations: List[str]
+    stop_trading: bool
+
+class V4SimpleRiskManager:
+
+    def __init__(self, initial_balance: float=10000):
+        self.initial_balance = initial_balance
+        self.current_balance = initial_balance
+        self.max_balance = initial_balance
+        self.MAX_DRAWDOWN = 0.2
+        self.DAILY_LOSS_LIMIT = 0.05
+        self.FIXED_POSITION_SIZE = 0.01
+        self.MAX_CONSECUTIVE_LOSSES = 5
+        self.daily_pnl = 0.0
+        self.trades_today = 0
+        self.trade_history = []
+        self.consecutive_losses = 0
+        self.last_reset_date = datetime.now().date()
+        self.violations = []
+        print(f'✓ V4 Risk Manager initialized')
+        print(f'  Fixed position size: {self.FIXED_POSITION_SIZE} lots')
+        print(f'  Max drawdown: {self.MAX_DRAWDOWN:.1%}')
+        print(f'  Daily loss limit: {self.DAILY_LOSS_LIMIT:.1%}')
+
+    def reset_daily_tracking(self):
+        current_date = datetime.now().date()
+        if current_date > self.last_reset_date:
+            self.daily_pnl = 0.0
+            self.trades_today = 0
+            self.last_reset_date = current_date
+
+    def validate_trade(self, symbol: str, direction: str, current_price:
+        float=0) ->Tuple[bool, List[str]]:
+        self.reset_daily_tracking()
+        violations = []
+        current_drawdown = (self.max_balance - self.current_balance
+            ) / self.max_balance
+        if current_drawdown >= self.MAX_DRAWDOWN:
+            violations.append(
+                f'Maximum drawdown exceeded: {current_drawdown:.1%}')
+        daily_loss_pct = abs(self.daily_pnl
+            ) / self.current_balance if self.daily_pnl < 0 else 0
+        if daily_loss_pct >= self.DAILY_LOSS_LIMIT:
+            violations.append(
+                f'Daily loss limit exceeded: {daily_loss_pct:.1%}')
+        if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+            violations.append(
+                f'Too many consecutive losses: {self.consecutive_losses}')
+        if self.current_balance < self.initial_balance * 0.5:
+            violations.append('Account balance below 50% of initial capital')
+        current_time = datetime.now()
+        if current_time.weekday() >= 5:
+            violations.append('Weekend trading not allowed')
+        is_valid = len(violations) == 0
+        if violations:
+            self.violations.extend(violations)
+        return is_valid, violations
+
+    def record_trade_result(self, pnl: float, trade_details: Dict=None):
+        self.reset_daily_tracking()
+        self.current_balance += pnl
+        self.daily_pnl += pnl
+        self.trades_today += 1
+        if self.current_balance > self.max_balance:
+            self.max_balance = self.current_balance
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+        trade_record = {'timestamp': datetime.now(), 'pnl': pnl, 'balance':
+            self.current_balance, 'daily_pnl': self.daily_pnl,
+            'consecutive_losses': self.consecutive_losses, 'drawdown': (
+            self.max_balance - self.current_balance) / self.max_balance}
+        if trade_details:
+            trade_record.update(trade_details)
+        self.trade_history.append(trade_record)
+        if pnl < 0 and self.consecutive_losses >= 3:
+            print(f'⚠️  {self.consecutive_losses} consecutive losses')
+        if self.current_balance > self.max_balance * 0.95:
+            print(f'✓ Near peak balance: ${self.current_balance:.2f}')
+
+    def get_risk_metrics(self) ->V4RiskMetrics:
+        self.reset_daily_tracking()
+        current_drawdown = (self.max_balance - self.current_balance
+            ) / self.max_balance
+        if self.trade_history:
+            winning_trades = [t for t in self.trade_history if t['pnl'] > 0]
+            win_rate = len(winning_trades) / len(self.trade_history)
+        else:
+            win_rate = 0.0
+        active_violations = []
+        if current_drawdown >= self.MAX_DRAWDOWN:
+            active_violations.append('Maximum drawdown exceeded')
+        daily_loss_pct = abs(self.daily_pnl
+            ) / self.current_balance if self.daily_pnl < 0 else 0
+        if daily_loss_pct >= self.DAILY_LOSS_LIMIT:
+            active_violations.append('Daily loss limit exceeded')
+        if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+            active_violations.append('Too many consecutive losses')
+        stop_trading = len(active_violations
+            ) > 0 or self.current_balance < self.initial_balance * 0.5
+        return V4RiskMetrics(account_balance=self.current_balance,
+            current_drawdown=current_drawdown, daily_pnl=daily_loss_pct,
+            total_trades=len(self.trade_history), win_rate=win_rate,
+            risk_violations=active_violations, stop_trading=stop_trading)
+
+    def should_stop_trading(self) ->bool:
+        metrics = self.get_risk_metrics()
+        return metrics.stop_trading
+
+    def get_position_size(self) ->float:
+        return self.FIXED_POSITION_SIZE
+
+    def get_trading_summary(self) ->Dict:
+        if not self.trade_history:
+            return {'message': 'No trades recorded', 'initial_balance':
+                self.initial_balance, 'current_balance': self.current_balance}
+        total_pnl = sum(t['pnl'] for t in self.trade_history)
+        total_return = total_pnl / self.initial_balance
+        profitable_trades = [t for t in self.trade_history if t['pnl'] > 0]
+        losing_trades = [t for t in self.trade_history if t['pnl'] < 0]
+        win_rate = len(profitable_trades) / len(self.trade_history)
+        avg_win = np.mean([t['pnl'] for t in profitable_trades]
+            ) if profitable_trades else 0
+        avg_loss = np.mean([t['pnl'] for t in losing_trades]
+            ) if losing_trades else 0
+        profit_factor = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        max_drawdown = max([t['drawdown'] for t in self.trade_history])
+        return {'initial_balance': self.initial_balance, 'current_balance':
+            self.current_balance, 'total_pnl': total_pnl, 'total_return':
+            total_return, 'total_trades': len(self.trade_history),
+            'winning_trades': len(profitable_trades), 'losing_trades': len(
+            losing_trades), 'win_rate': win_rate, 'avg_win': avg_win,
+            'avg_loss': avg_loss, 'profit_factor': profit_factor,
+            'max_drawdown': max_drawdown, 'consecutive_losses': self.
+            consecutive_losses, 'daily_pnl': self.daily_pnl,
+            'fixed_position_size': self.FIXED_POSITION_SIZE,
+            'risk_violations': len(self.violations)}
+
+    def reset_account(self, new_balance: float=None):
+        if new_balance:
+            self.initial_balance = new_balance
+            self.current_balance = new_balance
+            self.max_balance = new_balance
+        else:
+            self.current_balance = self.initial_balance
+            self.max_balance = self.initial_balance
+        self.daily_pnl = 0.0
+        self.trades_today = 0
+        self.consecutive_losses = 0
+        self.trade_history = []
+        self.violations = []
+        self.last_reset_date = datetime.now().date()
+        print(f'✓ Account reset to ${self.current_balance:,.2f}')
+
+def main():
+    print('V4 Simple Risk Manager Demo')
+    print('=' * 40)
+    risk_mgr = V4SimpleRiskManager(10000)
+    print('\nSimulating trades:')
+    trade_scenarios = [(150, 'Small win'), (-80, 'Small loss'), (300,
+        'Good win'), (-120, 'Loss'), (-150, 'Another loss'), (-100,
+        'Third loss'), (200, 'Recovery win'), (-200, 'Larger loss'), (-180,
+        'Another loss - should trigger consecutive loss warning')]
+    for pnl, description in trade_scenarios:
+        is_valid, violations = risk_mgr.validate_trade('EURUSD', 'buy', 1.2)
+        if is_valid:
+            risk_mgr.record_trade_result(pnl, {'description': description})
+            print(
+                f'✓ {description}: ${pnl:+.2f} | Balance: ${risk_mgr.current_balance:.2f}'
+                )
+        else:
+            print(f'✗ Trade blocked: {violations}')
+            break
+        if risk_mgr.should_stop_trading():
+            print('🛑 Trading stopped due to risk limits!')
+            break
+    print('\nFinal Risk Assessment:')
+    metrics = risk_mgr.get_risk_metrics()
+    print(f'  Account Balance: ${metrics.account_balance:.2f}')
+    print(f'  Current Drawdown: {metrics.current_drawdown:.1%}')
+    print(f'  Daily P&L: {risk_mgr.daily_pnl:+.2f}')
+    print(f'  Total Trades: {metrics.total_trades}')
+    print(f'  Win Rate: {metrics.win_rate:.1%}')
+    print(f'  Should Stop Trading: {metrics.stop_trading}')
+    if metrics.risk_violations:
+        print(f'  Violations: {metrics.risk_violations}')
+    print('\nTrading Summary:')
+    summary = risk_mgr.get_trading_summary()
+    for key, value in summary.items():
+        if isinstance(value, float):
+            if 'rate' in key or 'return' in key:
+                print(f'  {key}: {value:.1%}')
+            else:
+                print(f'  {key}: {value:.2f}')
+        else:
+            print(f'  {key}: {value}')
+
+if __name__ == '__main__':
+    main()
+
+================================================
+File: test_config.py
+================================================
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+from config import PRESET_CONFIGS, print_config_summary, create_model_config
+from model import create_model_from_config
+
+def test_all_configurations():
+    print('🧪 Testing V4 Configurable DQN Architecture')
+    print('=' * 60)
+    for config_name in PRESET_CONFIGS.keys():
+        print(f'\n🔧 Testing {config_name.upper()} Configuration')
+        print('-' * 40)
+        try:
+            model, trainer, config = create_model_from_config(config_name)
+            import torch
+            test_input = torch.randn(1, 4)
+            with torch.no_grad():
+                output = model(test_input)
+            print(f'✅ Model created successfully')
+            print(f'   Input shape: {test_input.shape}')
+            print(f'   Output shape: {output.shape}')
+            print(
+                f"   Network layers: {len(config['network']['hidden_layers'])}"
+                )
+            print(
+                f'   Parameters: {sum(p.numel() for p in model.parameters()):,}'
+                )
+        except Exception as e:
+            print(f'❌ Error with {config_name}: {e}')
+    print(f'\n✅ All configuration tests completed!')
+
+def test_snake_vs_sophisticated():
+    print('\n🐍 Snake vs Sophisticated Architecture Comparison')
+    print('=' * 60)
+    configs_to_compare = ['development', 'testing', 'competition']
+    for config_name in configs_to_compare:
+        model, trainer, config = create_model_from_config(config_name)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.
+            requires_grad)
+        print(f'\n{config_name.upper()}:')
+        print(
+            f"  Architecture: {[4] + config['network']['hidden_layers'] + [3]}"
+            )
+        print(f'  Total Parameters: {total_params:,}')
+        print(f'  Trainable Parameters: {trainable_params:,}')
+        print(f"  Memory Size: {config['training']['memory_size']:,}")
+        print(f"  Batch Size: {config['training']['batch_size']:,}")
+        print(f"  Learning Rate: {config['training']['lr']}")
+        print(f'  Advanced Features:')
+        print(f"    • Double DQN: {config['advanced']['double_dqn']}")
+        print(f"    • Dueling DQN: {config['advanced']['dueling_dqn']}")
+        print(
+            f"    • Prioritized Replay: {config['advanced']['prioritized_replay']}"
+            )
+
+def show_config_details():
+    print('\n📋 Configuration Details')
+    print('=' * 60)
+    print_config_summary('testing')
+    print(f'\n🎯 V4 Philosophy Maintained:')
+    print(
+        f'  ✓ State Space: Always 4 inputs (price_level, volatility, position_size, immediate_risk)'
+        )
+    print(f'  ✓ Action Space: Always 3 outputs (Hold, Buy, Sell)')
+    print(f'  ✓ Simplicity: No technical indicators, just raw market state')
+    print(
+        f'  ✓ Configurable: Network complexity adjustable while keeping V4 principles'
+        )
+
+def main():
+    print('V4 Configurable DQN Architecture Test Suite')
+    print('=' * 80)
+    test_all_configurations()
+    test_snake_vs_sophisticated()
+    show_config_details()
+    print(f'\n🎉 Test suite completed successfully!')
+    print(
+        f"💡 You can now use sophisticated DQN architectures while maintaining V4's simple 4-input philosophy!"
+        )
+    print(f'\nExample usage:')
+    print(
+        f'  python agent.py --config development --episodes 50   # Fast testing'
+        )
+    print(
+        f'  python agent.py --config testing --episodes 200     # Standard training'
+        )
+    print(
+        f'  python agent.py --config competition --episodes 1000 # Full sophistication'
+        )
+
+if __name__ == '__main__':
+    main()
+
+================================================
+File: trainer.py
+================================================
+import torch
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from agent import Agent
+from forex_game import ForexGameAI
+from helper import plot, plot_trade_analysis, save_performance_report
+
+class V4Trainer:
+
+    def __init__(self, data_path=None):
+        self.data_path = data_path
+        self.agent = Agent()
+        self.game = None
+        self.scores = []
+        self.mean_scores = []
+        self.portfolio_values = []
+        self.total_score = 0
+        self.record = 0
+        self.best_portfolio = 10000
+
+    def load_data(self):
+        if self.data_path and os.path.exists(self.data_path):
+            try:
+                df = pd.read_csv(self.data_path)
+                print(
+                    f'Loaded real data: {len(df)} candles from {self.data_path}'
+                    )
+                return df
+            except Exception as e:
+                print(f'Error loading data: {e}')
+                print('Falling back to synthetic data...')
+        from real_data_loader import load_real_gbpusd_data
+        try:
+            data, _ = load_real_gbpusd_data()
+            print(f'Loaded real GBPUSD data: {len(data)} candles')
+            return data
+        except Exception as e:
+            print(f'Error loading real data: {e}')
+            raise RuntimeError('No data available for training')
+
+    def train(self, max_episodes=1000, save_interval=100, plot_interval=10):
+        print('Starting V4 Forex DQN Training')
+        print('Philosophy: Simplicity beats complexity')
+        print('State: 4 simple inputs, Actions: 3 simple outputs')
+        print('=' * 60)
+        data = self.load_data()
+        self.game = ForexGameAI(data)
+        while self.agent.n_games < max_episodes:
+            state_old = self.agent.get_state(self.game)
+            final_move = self.agent.get_action(state_old)
+            action_name = ['HOLD', 'BUY', 'SELL'][final_move.index(1)]
+            reward, done, portfolio_value = self.game.play_step(final_move.
+                index(1))
+            state_new = self.agent.get_state(self.game)
+            if self.game.current_step % 100 == 0:
+                current_price = self.game.data.iloc[self.game.current_step][
+                    'close'] if self.game.current_step < len(self.game.data
+                    ) else 0
+                print(
+                    f'Step {self.game.current_step:5d} | Price: ${current_price:.5f} | Action: {action_name} | Reward: {reward:5.1f} | Portfolio: ${portfolio_value:.2f}'
+                    )
+            self.agent.train_short_memory(state_old, final_move, reward,
+                state_new, done)
+            self.agent.remember(state_old, final_move, reward, state_new, done)
+            if done:
+                self.game.reset()
+                self.agent.n_games += 1
+                self.agent.train_long_memory()
+                total_return = (portfolio_value - self.game.initial_balance
+                    ) / self.game.initial_balance * 100
+                if total_return > self.record:
+                    self.record = total_return
+                    self.agent.model.save('best_return_model.pth')
+                if portfolio_value > self.best_portfolio:
+                    self.best_portfolio = portfolio_value
+                    self.agent.model.save(
+                        f'best_portfolio_${int(portfolio_value)}.pth')
+                self.scores.append(total_return)
+                self.total_score += total_return
+                mean_score = self.total_score / self.agent.n_games
+                self.mean_scores.append(mean_score)
+                self.portfolio_values.append(portfolio_value)
+                print(
+                    f'Episode {self.agent.n_games:4d} | Portfolio: ${portfolio_value:8.2f} | Return: {total_return:6.2f}% | Record: {self.record:6.2f}% | ε: {max(0, self.agent.epsilon):3.0f}'
+                    )
+                stats = self.game.get_trade_stats()
+                if stats['total_trades'] > 0:
+                    print(
+                        f"         Trades: {stats['total_trades']:3d} | Win Rate: {stats['win_rate']:5.1%} | Avg P&L: ${stats['avg_pnl']:6.2f} | Total P&L: ${stats['total_pnl']:7.2f}"
+                        )
+                if self.agent.n_games % plot_interval == 0:
+                    try:
+                        plot(self.scores, self.mean_scores, self.
+                            portfolio_values)
+                    except Exception as e:
+                        print(f'Plotting error: {e}')
+                if self.agent.n_games % save_interval == 0:
+                    self.save_checkpoint()
+                    print(f'Checkpoint saved at episode {self.agent.n_games}')
+        print(f'\nTraining completed after {self.agent.n_games} episodes!')
+        self.save_final_results()
+
+    def save_checkpoint(self):
+        checkpoint = {'episode': self.agent.n_games, 'model_state_dict':
+            self.agent.model.state_dict(), 'scores': self.scores,
+            'mean_scores': self.mean_scores, 'portfolio_values': self.
+            portfolio_values, 'record': self.record, 'best_portfolio': self
+            .best_portfolio}
+        torch.save(checkpoint, f'checkpoint_episode_{self.agent.n_games}.pth')
+
+    def load_checkpoint(self, checkpoint_path):
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path)
+            self.agent.model.load_state_dict(checkpoint['model_state_dict'])
+            self.agent.n_games = checkpoint['episode']
+            self.scores = checkpoint['scores']
+            self.mean_scores = checkpoint['mean_scores']
+            self.portfolio_values = checkpoint['portfolio_values']
+            self.record = checkpoint['record']
+            self.best_portfolio = checkpoint['best_portfolio']
+            print(f'Loaded checkpoint from episode {self.agent.n_games}')
+            return True
+        return False
+
+    def save_final_results(self):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.agent.model.save(f'final_model_{timestamp}.pth')
+        save_performance_report(self.agent, self.game,
+            f'performance_report_{timestamp}.txt')
+        try:
+            plot_trade_analysis(self.game.trades_history)
+            print('Trade analysis plot displayed')
+        except Exception as e:
+            print(f'Could not generate trade analysis plot: {e}')
+        final_portfolio = self.portfolio_values[-1
+            ] if self.portfolio_values else self.game.initial_balance
+        final_return = (final_portfolio - self.game.initial_balance
+            ) / self.game.initial_balance * 100
+        print(f"\n{'=' * 60}")
+        print('FINAL TRAINING SUMMARY')
+        print(f"{'=' * 60}")
+        print(f'Episodes: {self.agent.n_games}')
+        print(f'Final Portfolio: ${final_portfolio:,.2f}')
+        print(f'Total Return: {final_return:.2f}%')
+        print(f'Best Portfolio: ${self.best_portfolio:,.2f}')
+        print(f'Best Return: {self.record:.2f}%')
+        if self.game.trades_history:
+            stats = self.game.get_trade_stats()
+            print(f"Total Trades: {stats['total_trades']}")
+            print(f"Win Rate: {stats['win_rate']:.2%}")
+            print(f"Avg P&L: ${stats['avg_pnl']:.2f}")
+        print(f'\nV4 Philosophy Validation:')
+        print(f'✓ Simple State: 4 inputs only')
+        print(f'✓ Fixed Risk: 0.01 lots per trade')
+        print(f'✓ No Indicators: Pure price/volatility/risk')
+        print(f'✓ Immediate Feedback: Binary profit/loss rewards')
+        print(f'✓ Continuous Learning: {len(self.agent.memory)} experiences')
+
+def main():
+    real_data_path = '/home/hung/Public/Test/FX/data/GBPUSD60.csv'
+    trainer = V4Trainer(real_data_path)
+    latest_checkpoint = None
+    for file in os.listdir('.'):
+        if file.startswith('checkpoint_episode_') and file.endswith('.pth'):
+            latest_checkpoint = file
+    if latest_checkpoint:
+        response = input(
+            f'Found checkpoint {latest_checkpoint}. Resume training? (y/n): ')
+        if response.lower() == 'y':
+            trainer.load_checkpoint(latest_checkpoint)
+    try:
+        trainer.train(max_episodes=500, save_interval=50, plot_interval=10)
+    except KeyboardInterrupt:
+        print('\nTraining interrupted by user')
+        trainer.save_checkpoint()
+        trainer.save_final_results()
+    except Exception as e:
+        print(f'Training error: {e}')
+        trainer.save_checkpoint()
+
+if __name__ == '__main__':
+    main()
+
