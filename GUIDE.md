@@ -2,7 +2,7 @@
 
 ```
 
-v4/
+./
 ├── core/
 │   ├── agent.py               # Base RL agent logic (epsilon, memory, training)
 │   ├── model.py               # DQN architecture: Linear\_QNet, Dueling, etc.
@@ -508,3 +508,35 @@ Optional:
 | Market Impact / Slippage Handling | ⚠️     | No pip-adjustment logic yet                         |
 | Online Training Loop              | ⚠️     | No periodic update of Q-net shown in deployment     |
 | Backtesting Framework             | ✅      | MultiDatasetTradingEnv + walk-forward planned       |
+
+------------------------------------------------
+
+* ✅ **Simplifying improves RL performance**
+  The Snake game's DeepQ agent succeeds due to minimalism: 11 binary inputs, immediate binary rewards, and clean termination. Applying the same logic to Forex—reducing to 4 float features, binary rewards (+10/-10), and simple termination—makes the environment easier to learn for the agent, reducing noise and overfitting.
+
+* ✅ **State complexity was a root cause of failure**
+  `original_src.txt` used 13 engineered features (like volatility clustering, volume ratio, etc.) which increased dimensionality and noise. This contradicts the success principle of Snake, where state = \[11 binary values]. A simpler state with 4 features (momentum, position, PnL, session time) keeps learning focused.
+
+* ✅ **Reward engineering was overcomplicated and noisy**
+  Previous versions used overlapping reward triggers (SL/TP, manual close, penalty on drawdown), creating ambiguous signals. Snake succeeds with immediate and clear binary rewards (+10/-10), which trading now mimics by rewarding only profitable closes. This helps the agent align actions with outcomes more effectively.
+
+* ✅ **Episode termination logic is now coherent**
+  In `original_src.txt`, episodes could end due to multiple unrelated conditions (drawdown, equity, max steps), which confuses the RL loop. Simplified Snake-style logic (end at max step or end of data) makes training cycles predictable and stable.
+
+* ✅ **Refactoring into modular structure reduces code entropy**
+  GUIDE.md reorganizes components into `core`, `env`, `training`, etc., following a modular RL pattern. This aligns with good software engineering and makes future experimentation (grid search, live trading) manageable. The previous code had logic scattered across scripts, increasing fragility.
+
+* ✅ **Binary reward formulation validated across domains**
+  `README.md` reinforces this Snake-inspired reward system as ideal for real-time trading: binary outcome (+10/-10), fixed lot size, no technical indicators. This abstraction removes the need for arbitrary threshold tuning and simplifies RL gradients.
+
+* ✅ **Training loop is now maintainable and testable**
+  The final Snake-style training loop avoids hardcoding (like fixed epsilon decay), encourages use of YAML config, and supports extension (e.g., replay buffer, dueling DQN). Previous loops mixed logic, logging, and control flow, making debugging harder.
+
+* ✅ **Bridge modules for live trading are non-invasive**
+  Claude-comments.md proposed adding only one bridge module between Gym and DWX. This lets the same RL agent trade both in backtest and live, without changing the core model logic. It solves the deployment mismatch issue of previous versions.
+
+* ✅ **File structure avoids bloat and redundancy**
+  The v4 directory is structured to avoid file explosion. Each script has a narrow purpose, and test/demo files are grouped, solving issues seen in older versions with scattered demo/test hybrids.
+
+* ✅ **Design supports future upgrades**
+  While minimal now, the current system can scale: optional config files can enable advanced features like Sharpe-based rewards, volatility control, and multi-agent coordination. Starting simple allows gradual evolution, avoiding premature complexity.
