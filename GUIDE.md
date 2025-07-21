@@ -166,3 +166,345 @@ elif args.mode == 'live':
 elif args.mode == 'grid':
     run_search(configs)
 ```
+
+------------------------------------------------
+
+# GUIDELINE in STEPS
+
+## Step 1: Define Core Problem
+
+```python
+start_thinking_session(
+  problem="Training a DQN-based Forex RL agent with minimal state, but code is fragmented, redundant, and misaligned with prepared dataset",
+  success_criteria="Trainable model on GPU with reusable code structure and correct data pipeline",
+  constraints="No fake data, reuse libraries, only GPU training for now"
+)
+```
+
+---
+
+## Step 2: First Principles Breakdown
+
+```python
+add_thought(content="We only need 3 core modules: Env (state/reward), Agent (act/train), and Trainer (loop)", confidence=0.9)
+add_thought(content="Data is already preprocessed. Any code generating fake data is wasteful", confidence=1.0)
+add_thought(content="We already have utility libraries (risk, signal, etc.), reinventing them causes inconsistency", confidence=0.95)
+```
+
+---
+
+## Step 3: Detect Reinvention
+
+```python
+detect_code_reinvention(
+  proposed_code="Custom DataFrame simulator generating random OHLC",
+  existing_packages_checked="simple_data_feed.py, processed_historical_data.csv"
+)
+
+detect_code_reinvention(
+  proposed_code="Manual Q-learning loop with hardcoded reward logic",
+  existing_packages_checked="forex_env.py, config/reward_config.yaml"
+)
+```
+
+---
+
+## Step 4: Package + API Exploration
+
+```python
+explore_packages(task_description="lightweight DQN implementations for single agent Gym env", language="python")
+explore_packages(task_description="gym-compatible trading environments", language="python")
+```
+
+---
+
+## Step 5: Memory and Risk Rule Consolidation
+
+```python
+store_memory(
+  content="Reward design: symmetric TP/SL +10/-10 works best for discrete agent on forex; avoid MSE-style regression loss",
+  tags=["forex", "reward", "risk"],
+  importance=0.9
+)
+
+store_memory(
+  content="Risk module should cap DD, max open positions, and optionally track exposure by currency pair",
+  tags=["risk", "forex", "trading_env"]
+)
+```
+
+---
+
+## Step 6: Architecture Decision - Modular Structure
+
+```python
+record_architecture_decision(
+  decision_title="Code Refactor: Modular RL Design",
+  context="Too many demo/test files with overlapping RL code",
+  options_considered="Single monolith script per run, class-based modular system, notebook-based workflow",
+  chosen_option="Class-based modular with CLI",
+  rationale="Reuse components across offline/online/live/demonstration pipelines",
+  consequences="Need consistent interfaces for all agents and envs"
+)
+```
+
+---
+
+## Step 7: Project Refactoring Plan
+
+```python
+store_memory(
+  content="Break system into: core/agent.py, core/model.py, env/forex_env.py, training/trainer.py, utils/logger.py, config/*.yaml",
+  tags=["project_structure", "refactor"],
+  importance=0.95
+)
+```
+
+---
+
+## Step 8: Validate Real Data Usage
+
+```python
+validate_package_usage("""
+data = generate_fake_ohlc(1000)  # ⚠️ Not using real forex data
+env = CustomForexEnv(data)
+""")
+# Warning: Use `load_processed_data()` from prepared data source
+```
+
+---
+
+## Step 9: Rewrite CLI Launcher
+
+```python
+add_coding_thought(
+  content="We should have one entrypoint file `run.py` that takes mode=train/test/live and config name",
+  confidence=0.95
+)
+
+store_codebase_pattern(
+  pattern_type="cli_launcher",
+  code_snippet="""
+if args.mode == 'train':
+    train_loop(config)
+elif args.mode == 'test':
+    evaluate_model(config)
+""",
+  tags=["entrypoint", "cli"]
+)
+```
+
+---
+
+## Step 10: Auto-check Data Consistency
+
+```python
+add_thought(
+  content="Training loop should validate data length, feature count, NaNs before starting",
+  confidence=0.95
+)
+
+store_codebase_pattern(
+  pattern_type="data_validation",
+  code_snippet="""
+assert data.shape[1] == config.input_size
+assert not data.isna().any().any()
+""",
+  tags=["data", "robustness"]
+)
+```
+
+---
+
+## Step 11: Prevent Test Explosion
+
+```python
+add_thought(
+  content="All demos must inherit BaseDemoRunner; forbid creation of adhoc `train_test_v9.py`, `demo1.py`, etc.",
+  confidence=1.0
+)
+
+record_architecture_decision(
+  decision_title="Prevent File Explosion",
+  context="100+ redundant files for testing",
+  options_considered="Free-form demos, class-based demos, CLI test manager",
+  chosen_option="class-based DemoRunner",
+  rationale="Centralized config, consistent evaluation logic",
+  consequences="Need unified interface for test runs"
+)
+```
+
+---
+
+## Step 12: Enforce Config Consistency
+
+```python
+store_memory(
+  content="All experiments should use YAML or JSON config files; hardcoded hyperparameters forbidden",
+  tags=["config_management"],
+  pattern_type="training_best_practices"
+)
+
+validate_package_usage("""
+lr = 0.0003  # hardcoded!
+""")
+# Suggestion: Move to config/training.yaml
+```
+
+---
+
+## Step 13: Add Config Generator
+
+```python
+add_coding_thought(
+  content="Grid search and ablation studies require config combinator (e.g., with Hydra or simple YAML loader)",
+  confidence=0.85
+)
+
+store_codebase_pattern(
+  pattern_type="grid_config_generator",
+  code_snippet="""
+for lr in [0.001, 0.0003]:
+  for eps in [0.1, 0.01]:
+    config = base_config.copy()
+    config['lr'] = lr
+    config['eps'] = eps
+    save_yaml(config, f"configs/run_{lr}_{eps}.yaml")
+""",
+  tags=["experiments", "config"]
+)
+```
+
+------------------------------------------------
+
+# MATERIALS CHECK
+
+## ✅ Combined and Evaluated Summary of All Documents
+
+---
+
+### 📄 **1. Claude-comments.md**&#x20;
+
+* ✅ *Correct bridge structure between Gym-Trading-Env and DWXConnect*
+  **Reason**: Maintains consistency in state/action between training and live phases without rewriting the core environments.
+
+* ✅ *Minimal required code modifications stated clearly*
+  **Reason**: Recommends extending only `tick_processor` in `dwx_client_example.py` and adding a bridge — no overengineering.
+
+* ⚠️ *Missing reward feedback in live execution*
+  **Reason**: Only executes actions but doesn’t calculate and log live reward — necessary for live performance monitoring or online learning.
+
+* ⚠️ *No mention of risk management or position sizing*
+  **Reason**: Assumes fixed 0.01 lots without adaptive control or drawdown protection, which is unsafe in volatile markets.
+
+---
+
+### 📄 **2. Deepseek-2-projects.md**&#x20;
+
+* ✅ *Clear step-by-step pseudocode from training to live deployment*
+  **Reason**: Follows the Deep Q-Learning loop structure properly with separation of training and inference.
+
+* ✅ *Training pipeline with DQN and replay buffer*
+  **Reason**: Correctly uses experience replay and target network setup for DQN agent.
+
+* ⚠️ *Action space limited to long/flat*
+  **Reason**: Lacks shorting option and more flexible actions (e.g. lot sizes), which limits adaptability in real-world trading.
+
+* ⚠️ *Risk management and reward shaping omitted*
+  **Reason**: No logic for stop-loss, take-profit, or capital preservation, making it unsuitable for deployment without enhancement.
+
+---
+
+### 📄 **3. new-idea-plan.md**&#x20;
+
+* ✅ *Modular architecture separating intelligence (local) and execution (VPS)*
+  **Reason**: Reduces risk and improves flexibility by decoupling model decision logic from trading infrastructure.
+
+* ✅ *Comprehensive live data crawling and multi-timeframe feature generation*
+  **Reason**: Includes RSI, SMA, volume normalization, and trend detection, aligned with how humans analyze markets.
+
+* ✅ *Signal structure matches DWXConnect format exactly*
+  **Reason**: Prepares messages with symbol, order\_type, timestamp, and risk settings — easy to parse on VPS.
+
+* ✅ *Telegram bot for secure, real-time signal delivery*
+  **Reason**: Asynchronous, encrypted communication with authentication hash to ensure order integrity.
+
+* ✅ *Risk Manager handles drawdown, trade count, and position sizing*
+  **Reason**: Prevents overtrading and enforces capital preservation rules per day and trade.
+
+* ✅ *Execution engine on VPS respects lot limits, symbols, and drawdown thresholds*
+  **Reason**: Enforces centralized safety logic and order constraints before submission to MT4.
+
+* ✅ *Built-in metrics tracking, alerting, and model confidence thresholds*
+  **Reason**: Adds Sharpe ratio, win rate, and confidence filtering to avoid reckless trades.
+
+* ⚠️ *Missing online learning or real-time model updates*
+  **Reason**: No active online training or continuous learning logic included in this version.
+
+---
+
+### 📄 **4. qwen-2-project.txt**&#x20;
+
+* ✅ *Covers all 10 core Deep RL integration layers (model load, action mapping, training loop, backtesting)*
+  **Reason**: Based on checklist from prior Claude and Assistant conversations.
+
+* ✅ *Includes model hot-swapping logic via file watcher*
+  **Reason**: Enables production reliability when models are retrained or updated.
+
+* ✅ *Complete reward and experience replay integration*
+  **Reason**: Adds TD-error, Q-value updates, and policy iteration loop support.
+
+* ✅ *Advanced backtesting with MultiDatasetTradingEnv and walk-forward validation*
+  **Reason**: Helps assess model generalization across time and regimes.
+
+* ⚠️ *No real code separation between training and execution*
+  **Reason**: Mixing model inference with DWX client code could make debugging and scaling difficult.
+
+---
+
+## ✅ Consolidated Summary (Pseudocode + Checklist Form)
+
+```
+System:
+  - Train locally via Gym-Trading-Env + DQN (3 actions: short, flat, long)
+  - Convert gym-format state ← market data from DWX tick feed
+  - Use replay buffer + prioritized experience + Sharpe reward
+  - Save model weights to file ("dqn_model.pth")
+
+Execution Flow (Live):
+  1. VPS listens via telegram_receiver.py
+  2. Local model sends signal JSON to VPS
+  3. ExecutionEngine checks risk + lot size + time
+  4. Order is placed via DWXConnect
+
+Modules:
+  - deepq_integration.py (model load + inference)
+  - feature_engineering.py (consistent state builder)
+  - risk_manager.py (daily limits, PnL, DD, SL)
+  - signal_generator.py (confidence + position change filter)
+  - telegram_sender.py / telegram_receiver.py (async, HMAC secure)
+  - execution_engine.py (executes trades, logs results)
+
+Optional:
+  - model_updater.py (hot-swapping on file change)
+  - live_reward_logger.py (for real-time performance tracking)
+```
+
+---
+
+## ✅ Final Evaluation Matrix
+
+| Feature                           | Status | Reason                                              |
+| --------------------------------- | ------ | --------------------------------------------------- |
+| Deep Q-Learning Agent             | ✅      | Training, experience replay, target net implemented |
+| Feature Engineering               | ✅      | RSI, SMA, volume, trend, consistent in live/train   |
+| Action Mapping (Buy/Sell/Close)   | ✅      | Used in bridge and VPS execution                    |
+| Risk Management                   | ✅      | Daily PnL, drawdown, trade caps, dynamic sizing     |
+| Live Data Feed (DWX)              | ✅      | Fully connected, on\_tick handler                   |
+| Signal Communication              | ✅      | Telegram with encryption and validation             |
+| Reward Function (Custom)          | ✅      | Supports Sharpe + PnL rewards                       |
+| Model Hot-Swapping                | ✅      | File watcher loads updated models                   |
+| Performance Monitoring            | ✅      | Metrics, alerts, visualization hooks                |
+| Market Impact / Slippage Handling | ⚠️     | No pip-adjustment logic yet                         |
+| Online Training Loop              | ⚠️     | No periodic update of Q-net shown in deployment     |
+| Backtesting Framework             | ✅      | MultiDatasetTradingEnv + walk-forward planned       |
