@@ -1,5 +1,3 @@
-Bạn đúng hoàn toàn - tôi đã mechanical copy mà không hiểu bản chất problem. Let me address từng điểm:
-
 ## **1. Về Core Module Structure**
 
 Snake problem khác fundamentally:
@@ -432,3 +430,105 @@ def seed(self):              # Reproducible episodes
 - Memory usage profiling
 - GPU utilization testing
 - Scalability with data size
+
+---
+
+## **Project Structure Setup**
+
+- Create `v12/` root directory with modular architecture
+- Setup `core/`, `env/`, `training/`, `utils/`, `tests/` subdirectories
+- Create `run.py` as single CLI entrypoint
+- Remove all V4 complex configuration files and grid search modules
+
+## **Core Module Implementation**
+
+- Strip down `original_src/agent.py` to basic DQN agent
+- Modify `Linear_QNet` input size from 11 to 4 features
+- Remove adaptive epsilon, performance tracking, complex training configs
+- Copy Snake's basic epsilon-greedy exploration and replay buffer
+- Implement binary action space (Long/Short only, no Hold)
+
+## **Environment Simplification**
+
+- Create `SimpleForexGame` class inheriting from base environment
+- Remove all complex features: volume ratio, session indicators, volatility clustering
+- Implement 4-feature state: price momentum, position state, unrealized PnL, time factor
+- Replace complex reward system with binary: +10 profitable close, -10 loss close
+- Simplify episode termination to single condition: end of data
+
+## **Data Pipeline Integration**
+
+- Copy `real_data_loader.py` functionality for GBPUSD H1 data loading
+- Remove synthetic data generation and fake OHLC creation
+- Implement consistent data preprocessing between training and live
+- Add data validation: check dimensions, NaN values, boundary conditions
+
+## **Look-Ahead Prevention Implementation**
+
+- Implement 3-thread synchronization system with event-driven architecture
+- Create `DataFeedingThread` for sequential bar processing
+- Create `TradingLogicThread` for decision making with current data only
+- Create `ExecutionThread` for order processing and state updates
+- Add queue-based data flow with temporal ordering enforcement
+
+## **Binary Classification Alternative**
+
+- Create supervised learning pipeline for pattern labeling
+- Label historical data: 1 if price higher after 1H, 0 otherwise
+- Train simple neural network for next-hour direction prediction
+- Compare binary classifier performance against DQN approach
+- Implement confidence-based position sizing
+
+## **Bridge Module Development**
+
+- Create state conversion between gym format and DWX format
+- Implement action translation: binary prediction to Long/Short DWX commands
+- Add real-time feature calculation matching training format
+- Integrate with existing DWX client tick processor
+
+## **Risk Management Simplification**
+
+- Implement fixed position sizing (0.01 lots initially)
+- Add basic drawdown protection and daily loss limits
+- Remove complex position sizing algorithms and correlation analysis
+- Add emergency stop mechanisms for live trading
+
+## **Testing Framework**
+
+- Create unit tests for 4-feature state calculation
+- Test binary reward system accuracy
+- Validate thread synchronization and temporal ordering
+- Test gym-to-DWX state conversion consistency
+- Add integration tests for complete training pipeline
+
+## **Training Loop Cleanup**
+
+- Copy Snake's simple training loop structure
+- Replace complex logging with basic episode metrics
+- Remove parallel training, grid search, configuration variations
+- Add model checkpointing and best performance tracking
+- Implement early stopping based on convergence
+
+## **Live Trading Integration**
+
+- Extend existing `tick_processor` class for live execution
+- Add trained model loading and inference
+- Implement real-time state buffer for feature calculation
+- Add position tracking and order management
+- Integrate with Telegram communication system
+
+## **Performance Validation**
+
+- Compare convergence speed with Snake game benchmarks
+- Validate state normalization ranges (-1 to 1)
+- Check reward signal variance and distribution
+- Monitor memory usage and training time per episode
+- Test on different market regimes and volatility periods
+
+## **Documentation and Cleanup**
+
+- Remove all demo files and redundant test scripts
+- Update project README with simplified architecture
+- Document 4-feature state representation rationale
+- Add troubleshooting guide for common convergence issues
+- Create deployment guide for live trading setup
