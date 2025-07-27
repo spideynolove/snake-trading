@@ -1,4 +1,3 @@
-
 Right now we focus on implementation, there will be no testing or training yet, 
 just code first, then I will bring the code to another GPU server later, remember 
 the following directory structure (because you will not be allowed to create new 
@@ -49,3 +48,9 @@ files, if you want to create, you must ask my opinion so I can review it)
 ```
 
 No docstring and comment in code, no intro, no conclusion in all answers.
+
+
+--------------------
+
+
+gitingest -e *.md,*.db,*.toml,LICENSE,materials/,__pycache__/,notebooks/,.gitignore, -o snake-trading.txt

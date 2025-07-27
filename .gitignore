@@ -2,3 +2,5 @@
 .venv/
 .python-version
 uv.lock
+legacy/
+snake-trading.txt
