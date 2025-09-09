@@ -4,6 +4,9 @@ from datetime import datetime
 import time
 import threading
 import queue
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
 from helpers import DataProcessor
 
 class RealTimeOHLCVFeeder:
@@ -182,6 +185,160 @@ class RealTimeOHLCVFeeder:
     
     def get_total_bars(self):
         return len(self.raw_data)
+
+
+class MultiCurrencyIndexFeeder:
+    def __init__(self, data_directory: str, speed_multiplier: int = 100):
+        self.data_directory = Path(data_directory)
+        self.speed_multiplier = speed_multiplier
+        
+        self.currency_data = {}
+        self.current_index = -1
+        self.running = False
+        self.data_processor = DataProcessor()
+        
+        self.combined_data = []
+        self.data_queue = queue.Queue()
+        
+        self._load_all_currencies()
+        self._prepare_combined_timeline()
+    
+    def _load_all_currencies(self):
+        for jsonl_file in self.data_directory.glob("stock_*.jsonl"):
+            ticker = jsonl_file.stem.replace("stock_", "")
+            currency_records = []
+            
+            with open(jsonl_file, 'r') as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                        processed_record = {
+                            'timestamp': datetime.strptime(record['PRICE_DATE'], '%Y-%m-%d'),
+                            'ticker': record['TICKER'],
+                            'currency_code': record['CURRENCY_CODE'],
+                            'open': float(record['OPEN_PRICE']),
+                            'high': float(record['DAILY_HIGH']),
+                            'low': float(record['DAILY_LOW']),
+                            'close': float(record['CLOSE_PRICE'])
+                        }
+                        currency_records.append(processed_record)
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+            
+            if currency_records:
+                df = pd.DataFrame(currency_records)
+                df.set_index('timestamp', inplace=True)
+                df = df[~df.index.duplicated(keep='last')]
+                df.sort_index(inplace=True)
+                self.currency_data[ticker] = df
+    
+    def _prepare_combined_timeline(self):
+        if not self.currency_data:
+            return
+        
+        all_timestamps = set()
+        for df in self.currency_data.values():
+            all_timestamps.update(df.index)
+        
+        sorted_timestamps = sorted(all_timestamps)
+        
+        for timestamp in sorted_timestamps:
+            combined_record = {'timestamp': timestamp}
+            
+            for ticker, df in self.currency_data.items():
+                if timestamp in df.index:
+                    record = df.loc[timestamp]
+                    combined_record[f'{ticker}_open'] = record['open']
+                    combined_record[f'{ticker}_high'] = record['high']
+                    combined_record[f'{ticker}_low'] = record['low']
+                    combined_record[f'{ticker}_close'] = record['close']
+                else:
+                    combined_record[f'{ticker}_open'] = np.nan
+                    combined_record[f'{ticker}_high'] = np.nan
+                    combined_record[f'{ticker}_low'] = np.nan
+                    combined_record[f'{ticker}_close'] = np.nan
+            
+            self.combined_data.append(combined_record)
+    
+    def get_next_bar(self):
+        if self.current_index + 1 >= len(self.combined_data):
+            return None
+        
+        self.current_index += 1
+        return self.combined_data[self.current_index]
+    
+    def get_current_state(self):
+        if self.current_index < 0:
+            return None
+        
+        current_bar = self.combined_data[self.current_index]
+        historical_data = self.combined_data[:self.current_index + 1]
+        
+        return {
+            'current_bar': current_bar,
+            'historical_data': historical_data,
+            'current_index': self.current_index,
+            'total_bars': len(self.combined_data),
+            'available_currencies': list(self.currency_data.keys())
+        }
+    
+    def get_currency_lookback(self, ticker: str, window_size: int = 50):
+        if self.current_index < 0 or ticker not in self.currency_data:
+            return None
+        
+        lookback_data = []
+        start_idx = max(0, self.current_index - window_size + 1)
+        
+        for i in range(start_idx, self.current_index + 1):
+            bar = self.combined_data[i]
+            if not np.isnan(bar.get(f'{ticker}_close', np.nan)):
+                lookback_data.append({
+                    'timestamp': bar['timestamp'],
+                    'open': bar[f'{ticker}_open'],
+                    'high': bar[f'{ticker}_high'],
+                    'low': bar[f'{ticker}_low'],
+                    'close': bar[f'{ticker}_close']
+                })
+        
+        return lookback_data
+    
+    def has_next_bar(self):
+        return self.current_index + 1 < len(self.combined_data)
+    
+    def reset(self):
+        self.current_index = -1
+    
+    def simulate_trading_session(self, callback_func=None):
+        self.running = True
+        while self.running and self.has_next_bar():
+            bar = self.get_next_bar()
+            if bar is None:
+                break
+            
+            if callback_func:
+                callback_func(self.get_current_state())
+            
+            time.sleep(3600 / self.speed_multiplier / 1000)
+        
+        self.running = False
+    
+    def start_async_simulation(self, callback_func):
+        def simulation_thread():
+            self.simulate_trading_session(callback_func)
+        
+        thread = threading.Thread(target=simulation_thread, daemon=True)
+        thread.start()
+        return thread
+    
+    def stop(self):
+        self.running = False
+    
+    def is_ready(self):
+        return len(self.combined_data) > 0
+    
+    def get_total_bars(self):
+        return len(self.combined_data)
+
 
 if __name__ == "__main__":
     def trading_callback(state):

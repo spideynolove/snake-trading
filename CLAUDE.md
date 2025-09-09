@@ -4,146 +4,129 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Snake-inspired Forex trading AI system using Deep Q-Learning (DQN) for trading decisions. The system applies Snake game principles to financial markets: minimal state representation (4 features), binary rewards (+10/-10), and simple action space (Close/Long/Short).
+This is a Snake-inspired Forex trading AI project that is currently in the foundation/planning stage. The goal is to develop a multi-pair forex trading system using Deep Q-Learning (DQN) with Snake game principles: minimal state representation, binary rewards, and simple action spaces.
 
-## Core Architecture
+**Current Status**: Infrastructure and planning phase - core trading system components are not yet implemented.
 
-### Key Components
-- **Agent** (`core/agent.py`): DQN agent with epsilon-greedy exploration, experience replay
-- **Environment** (`game_env/forex_env.py`): Trading environment with Snake-like state representation
-- **Model** (`core/model.py`): Linear DQN (4 inputs → 256 hidden → 3 outputs)
-- **Data Feed** (`integration/data_feed.py`): CSV processing with threading for temporal constraints
-- **Training** (`training/`): Offline training loops and evaluation
-- **Utils** (`utils/`): Logging, metrics, plotting, risk management
+## Current Architecture
 
-### State Representation (4 features like Snake)
-1. **Price Momentum**: Normalized price change over last 5 periods
-2. **Position State**: Current position direction (long/short/flat)  
-3. **Unrealized PnL**: Current position profit/loss ratio
-4. **Time Factor**: Session time normalization (0-1)
+The project currently consists of:
 
-### Action Space
-- **0: Close/Hold** — Close position or hold if flat
-- **1: Long** — Enter long position (if currently flat)
-- **2: Short** — Enter short position (if currently flat)
+### Implemented Components
+- **Data Processing** (`helpers.py`): Comprehensive OHLCV data processing library with technical indicators, rolling features, volatility calculations, pivot points, Fibonacci levels, and advanced features
+- **Data Streaming** (`ohlcv_feeder.py`): Real-time OHLCV feeder that simulates live streaming from CSV files with configurable speed multipliers
+- **Original Snake Reference** (`original-src/`): Original Snake game DQN implementation from tutorial series for reference
+- **Project Planning** (`materials/`): Detailed planning documents for the future multi-pair trading system
 
-### Reward System
-- **+10**: Profitable trade closure
-- **-10**: Losing trade closure  
-- **0**: While position is open
+### Not Yet Implemented
+- DQN agent and neural network models
+- Trading environment
+- Training infrastructure
+- Live trading integration
+- Test suites
 
 ## Development Commands
 
-### Training
+### Basic Data Processing Test
 ```bash
-# Basic training with CSV data
-python run.py --csv path/to/gbpusd_h1.csv --mode sequential
-
-# Threaded mode (experimental)  
-python run.py --csv path/to/gbpusd_h1.csv --mode threaded
-```
-
-### Testing
-```bash
-# Run all tests
-python -m unittest discover tests/
-
-# Run specific test modules
-python -m unittest tests.test_agent
-python -m unittest tests.test_env
-python -m unittest tests.test_trainer
+# Test the OHLCV feeder with sample data
+python ohlcv_feeder.py
 ```
 
 ### Dependencies
-Install required packages:
+Current dependencies based on existing code:
 ```bash
-pip install torch pandas numpy matplotlib pathlib
+pip install pandas numpy talib
+```
+
+Additional dependencies will be needed when implementing the DQN system:
+```bash
+pip install torch matplotlib pathlib
 ```
 
 ## Key Design Principles
 
-### Snake-Inspired Simplicity
-- **Minimal State**: Only 4 features vs complex technical indicators
+### Snake-Inspired Philosophy (Planned)
+- **Minimal State**: Limited feature set vs complex technical indicators
 - **Binary Rewards**: Clear +10/-10 signals vs continuous reward functions
-- **Fixed Position Size**: 0.01 lots to remove bet sizing complexity
-- **Simple Termination**: End of data or max steps
+- **Fixed Position Size**: Remove bet sizing complexity
+- **Simple Actions**: Close/Long/Short only
 
-### Threading Model
-The system uses a sophisticated threading model to prevent look-ahead bias:
-- **F1 Thread**: Data synchronization event
-- **F2 Thread**: Trading logic processing  
-- **F3 Thread**: Order execution
-- **Temporal Constraints**: Ensures agents only see current data point
+### Multi-Pair Vision (Future)
+According to `materials/new_plan.md`, the system will evolve to:
+- **8 Major Pairs**: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, NZDUSD, EURGBP, EURJPY
+- **56D State Space**: 48 pair-specific features + 8 portfolio-level features
+- **28 Actions**: 24 pair-specific + 4 portfolio-wide actions
+- **Correlation Awareness**: Real-time correlation matrix and conflict detection
 
-### Modular Architecture
+## Current File Structure
+
 ```
-core/           # Agent, model, replay buffer, config
-game_env/       # Trading environments (base, forex, hierarchical)
-integration/    # Live trading integration (DWX, data feeds)
-training/       # Training loops, evaluation, grid search
-utils/          # Logging, metrics, plotting, risk management
-tests/          # Unit tests for all components
+snake-trading/
+├── helpers.py                   # Data processing utilities (IMPLEMENTED)
+├── ohlcv_feeder.py             # CSV streaming simulator (IMPLEMENTED)
+├── original-src/               # Snake tutorial reference code
+│   ├── README_snake.md
+│   ├── game.py
+│   ├── model.py
+│   ├── agent.py
+│   └── ...
+├── materials/                  # Planning documents
+│   ├── new_plan.md            # Multi-pair system design
+│   └── content.md
+├── README.md                   # Project documentation
+└── Old_CLAUDE.md              # Previous documentation (outdated)
 ```
 
-## Configuration
+## Data Processing Capabilities
 
-### Model Parameters (in core/agent.py)
-- `MAX_MEMORY = 100_000` - Experience replay buffer size
-- `BATCH_SIZE = 1000` - Training batch size  
-- `LR = 0.001` - Learning rate
-- `gamma = 0.9` - Discount factor
-- Input size: 4, Hidden: 256, Output: 3
+### Technical Indicators
+The `helpers.py` module provides extensive technical analysis capabilities:
+- **Technical Indicators**: RSI, MACD, Bollinger Bands, etc. (via TA-Lib)
+- **Rolling Features**: Moving averages, standard deviations, momentum
+- **Price Patterns**: Doji, hammer, shooting star detection
+- **Volatility Models**: Parkinson, Garman-Klass, Yang-Zhang volatility
+- **Pivot Points**: Standard, Woodie, Camarilla calculations
+- **Fibonacci Levels**: Standard and extended retracements
 
-### Environment Parameters
-- `initial_balance = 10000.0` - Starting capital
-- Fixed lot size: 0.01 (implicit in reward calculation)
-- Session time normalization: 24-hour cycles
+### OHLCV Data Streaming
+The `ohlcv_feeder.py` provides:
+- CSV file parsing with configurable formats
+- Real-time simulation with speed multipliers
+- Lookback windows for historical context
+- State management for current market position
 
-## Live Trading Integration
+## Development Roadmap
 
-The system includes bridge modules for live trading via DWX (MetaTrader integration):
-- `integration/dwx_connector.py` - MetaTrader connection
-- `integration/signal_translator.py` - Action to MT4 order conversion
-- `integration/data_feed.py` - Real-time data processing
+Based on planning documents, the next development phases are:
 
-## Common Development Tasks
+### Phase 1: Core DQN Infrastructure
+1. Implement basic forex trading environment
+2. Create DQN agent and neural network models
+3. Build training loop infrastructure
 
-### Adding New Features
-1. Modify state representation in `game_env/forex_env.py:get_state()`
-2. Update model input size in `core/model.py` and `core/agent.py`
-3. Add corresponding tests in `tests/`
+### Phase 2: Single-Pair Trading
+1. Implement 4D state space (price momentum, position, PnL, time)
+2. 3-action space (Close/Long/Short)
+3. Binary reward system (+10/-10)
 
-### Training New Models
-1. Prepare CSV data with columns: timestamp, open, high, low, close, volume
-2. Run training with appropriate CSV path
-3. Models auto-save to `./model/model.pth` when record is beaten
-
-### Debugging Training Issues
-- Check data validation in `integration/data_feed.py`
-- Monitor epsilon decay in agent (starts at 80, decreases with games)
-- Use `utils/plots.py` for training visualizations
-- Check threading synchronization if using threaded mode
-
-## Performance Considerations
-
-- **GPU Support**: PyTorch models automatically use CUDA if available
-- **Memory Management**: Experience replay buffer has max size limit
-- **Threading**: Sequential mode is more stable, threaded mode is experimental
-- **Data Processing**: CSV files are validated and normalized on load
+### Phase 3: Multi-Pair System
+1. Expand to 56D state space across 8 pairs
+2. Implement correlation detection
+3. Add portfolio-level risk management
 
 ## Testing Strategy
 
-Tests cover:
-- Agent initialization and decision making
-- Environment state transitions and rewards
-- Model forward/backward passes
-- Data feed validation and processing
-- Memory replay functionality
+Currently no tests exist. When implementing:
+- Unit tests for data processing components
+- Environment state transition tests
+- Model training validation
+- Backtesting on historical CSV data
 
 ## Important Notes
 
-- The system prioritizes simplicity over complexity (Snake philosophy)
-- Temporal constraints prevent look-ahead bias in training
-- Binary rewards create clear learning signals
-- Fixed position sizing reduces parameter space
-- Modular design allows easy experimentation and extension
+- **Data Requirements**: OHLCV CSV files with columns: timestamp, open, high, low, close, volume
+- **Development Stage**: Foundation components only - main trading system not yet built
+- **Reference Code**: Use `original-src/` for Snake DQN implementation patterns
+- **Planning**: Refer to `materials/new_plan.md` for detailed future architecture
+- **Data Processing**: `helpers.py` provides production-ready feature engineering capabilities

@@ -1,59 +1,102 @@
-# Suggested Commands for Snake Trading AI
+# Snake Trading AI - Suggested Commands
 
-## Core Development Commands
+## Basic Development Commands
 
-### Training
+### Data Processing and Testing
 ```bash
-# Basic training with CSV data (recommended)
-python run.py --csv path/to/gbpusd_h1.csv --mode sequential
+# Test the OHLCV data feeder with sample data
+python ohlcv_feeder.py
 
-# Experimental threaded mode
-python run.py --csv path/to/gbpusd_h1.csv --mode threaded
+# Test the data processing utilities (requires sample CSV data)
+python -c "from helpers import DataProcessor; dp = DataProcessor(); print('DataProcessor loaded successfully')"
 ```
 
-### Testing
+### Python Environment
 ```bash
-# Run all tests
-python -m unittest discover tests/
+# Create virtual environment
+python -m venv .venv
 
-# Run specific test modules
-python -m unittest tests.test_agent
-python -m unittest tests.test_env
-python -m unittest tests.test_trainer
+# Activate virtual environment (Linux)
+source .venv/bin/activate
 
-# Using pytest (if available)
-python -m pytest tests/
-python -m pytest tests/test_agent.py -v
+# Install current dependencies
+pip install pandas numpy talib
+
+# Install future dependencies (when implementing DQN)
+pip install torch matplotlib pathlib
 ```
 
-### Dependencies Installation
+### File Operations
 ```bash
-# Install required packages
-pip install torch pandas numpy matplotlib pathlib
+# List project files
+ls -la
 
-# For development, also need
-pip install pytest  # for testing
+# Find Python files
+find . -name "*.py" -type f
+
+# Search in Python files
+grep -r "class " *.py
+
+# View project structure
+tree . -I '__pycache__|.venv|*.pyc'
 ```
 
-### Model Management
+### Git Operations
 ```bash
-# Models are automatically saved to ./model/model.pth when record is beaten
-# No manual model management commands - handled by training loop
+# View current status
+git status
+
+# View recent commits
+git log --oneline -10
+
+# View current branch
+git branch
+
+# View changes
+git diff
+
+# Stage changes
+git add .
+
+# Commit changes
+git commit -m "commit message"
 ```
 
-## System Utilities (Linux)
+## Project-Specific Commands
+
+### Exploring Reference Code
 ```bash
-# Basic file operations
-ls          # list files
-cd          # change directory
-grep        # search text
-find        # find files
-git         # version control
+# View the original Snake DQN implementation
+ls original-src/
+
+# Run the Snake game test (requires pygame)
+cd original-src && python test.py
 ```
 
-## Notes
-- No linting/formatting tools configured (flake8, black not available)
-- No build commands needed (pure Python project)  
-- No config files for development tools
-- Testing uses standard unittest framework
-- Project uses standard Python 3 with virtual environment at /home/hung/env/.venv/
+### Documentation
+```bash
+# View project documentation
+cat README.md
+
+# View planning documents
+ls materials/
+cat materials/new_plan.md
+```
+
+### Data Analysis
+```bash
+# Check available CSV data files (if any)
+find . -name "*.csv" -type f
+
+# View CSV file structure (replace with actual file)
+head -5 path/to/data.csv
+```
+
+## Development Notes
+
+- **No formal testing framework** is currently set up - tests need to be implemented
+- **No linting or formatting tools** are configured - consider adding black, flake8, pytest
+- **No dependency management** beyond basic pip install
+- **Main development files**: `helpers.py`, `ohlcv_feeder.py`
+- **Reference implementation**: `original-src/` directory contains Snake DQN tutorial code
+- **Planning documents**: `materials/` directory contains detailed future architecture plans

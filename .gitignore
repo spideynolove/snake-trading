@@ -7,3 +7,4 @@ snake-trading.txt
 materials/
 .serena/
 temp/
+__pycache__
